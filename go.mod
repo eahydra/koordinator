@@ -5,7 +5,7 @@ go 1.17
 require (
 	github.com/docker/docker v20.10.2+incompatible
 	github.com/fsnotify/fsnotify v1.4.9
-	github.com/go-logr/logr v0.4.0
+	github.com/go-logr/logr v1.2.3
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.2.0
