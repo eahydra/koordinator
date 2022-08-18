@@ -26,6 +26,13 @@ import (
 	deschedulerconfig "github.com/koordinator-sh/koordinator/pkg/descheduler/apis/config"
 )
 
+const (
+	// MinResourcePercentage is the minimum value of a resource's percentage
+	MinResourcePercentage = 0
+	// MaxResourcePercentage is the maximum value of a resource's percentage
+	MaxResourcePercentage = 100
+)
+
 func ValidateRemovePodsViolatingNodeAffinityArgs(path *field.Path, args *deschedulerconfig.RemovePodsViolatingNodeAffinityArgs) error {
 	var allErrs field.ErrorList
 
@@ -66,4 +73,48 @@ func ValidateMigrationControllerArgs(path *field.Path, args *deschedulerconfig.M
 		return nil
 	}
 	return allErrs.ToAggregate()
+}
+
+func ValidateHighNodeUtilizationArgs(args *deschedulerconfig.HighNodeUtilizationArgs) error {
+	return validateThresholds(args.Thresholds)
+}
+
+func ValidateLowNodeUtilizationArgs(args *deschedulerconfig.LowNodeUtilizationArgs) error {
+	return validateLowNodeUtilizationThresholds(args.Thresholds, args.TargetThresholds, args.UseDeviationThresholds)
+}
+
+func validateLowNodeUtilizationThresholds(thresholds, targetThresholds deschedulerconfig.ResourceThresholds, useDeviationThresholds bool) error {
+	// validate thresholds and targetThresholds config
+	if err := validateThresholds(thresholds); err != nil {
+		return fmt.Errorf("thresholds config is not valid: %v", err)
+	}
+	if err := validateThresholds(targetThresholds); err != nil {
+		return fmt.Errorf("targetThresholds config is not valid: %v", err)
+	}
+
+	// validate if thresholds and targetThresholds have same resources configured
+	if len(thresholds) != len(targetThresholds) {
+		return fmt.Errorf("thresholds and targetThresholds configured different resources")
+	}
+	for resourceName, value := range thresholds {
+		if targetValue, ok := targetThresholds[resourceName]; !ok {
+			return fmt.Errorf("thresholds and targetThresholds configured different resources")
+		} else if value > targetValue && !useDeviationThresholds {
+			return fmt.Errorf("thresholds' %v percentage is greater than targetThresholds'", resourceName)
+		}
+	}
+	return nil
+}
+
+// validateThresholds checks if thresholds have valid resource name and resource percentage configured
+func validateThresholds(thresholds deschedulerconfig.ResourceThresholds) error {
+	if len(thresholds) == 0 {
+		return fmt.Errorf("no resource threshold is configured")
+	}
+	for name, percent := range thresholds {
+		if percent < MinResourcePercentage || percent > MaxResourcePercentage {
+			return fmt.Errorf("%v threshold not in [%v, %v] range", name, MinResourcePercentage, MaxResourcePercentage)
+		}
+	}
+	return nil
 }

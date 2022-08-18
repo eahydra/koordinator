@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha2
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -143,3 +144,26 @@ type MigrationControllerArgs struct {
 	// DefaultDeleteOptions defines options when deleting migrated pods and preempted pods through the method specified by EvictionPolicy
 	DefaultDeleteOptions *metav1.DeleteOptions `json:"defaultDeleteOptions,omitempty"`
 }
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type LowNodeUtilizationArgs struct {
+	metav1.TypeMeta
+
+	UseDeviationThresholds bool               `json:"useDeviationThresholds,omitempty"`
+	Thresholds             ResourceThresholds `json:"thresholds,omitempty"`
+	TargetThresholds       ResourceThresholds `json:"targetThresholds,omitempty"`
+	NumberOfNodes          int                `json:"numberOfNodes,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type HighNodeUtilizationArgs struct {
+	metav1.TypeMeta
+
+	Thresholds    ResourceThresholds `json:"thresholds,omitempty"`
+	NumberOfNodes int                `json:"numberOfNodes,omitempty"`
+}
+
+type Percentage float64
+type ResourceThresholds map[corev1.ResourceName]Percentage

@@ -57,6 +57,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DefaultEvictorArgs{},
 		&RemovePodsViolatingNodeAffinityArgs{},
 		&MigrationControllerArgs{},
+		&LowNodeUtilizationArgs{},
+		&HighNodeUtilizationArgs{},
 	)
 
 	return nil

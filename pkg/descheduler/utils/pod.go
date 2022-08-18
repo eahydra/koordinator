@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
 // GetResourceRequest finds and returns the request value for a specific resource.
@@ -136,4 +137,33 @@ func GetPodSource(pod *corev1.Pod) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("cannot get source of pod %q", pod.UID)
+}
+
+// PodToleratesTaints returns true if a pod tolerates one node's taints
+func PodToleratesTaints(pod *corev1.Pod, taintsOfNodes map[string][]corev1.Taint) bool {
+	for nodeName, taintsForNode := range taintsOfNodes {
+		if len(pod.Spec.Tolerations) >= len(taintsForNode) {
+			if TolerationsTolerateTaintsWithFilter(pod.Spec.Tolerations, taintsForNode, nil) {
+				return true
+			}
+
+			if klog.V(5).Enabled() {
+				for i := range taintsForNode {
+					if !TolerationsTolerateTaint(pod.Spec.Tolerations, &taintsForNode[i]) {
+						klog.V(5).InfoS("Pod doesn't tolerate node taint",
+							"pod", klog.KObj(pod),
+							"nodeName", nodeName,
+							"taint", fmt.Sprintf("%s:%s=%s", taintsForNode[i].Key, taintsForNode[i].Value, taintsForNode[i].Effect),
+						)
+					}
+				}
+			}
+		} else {
+			klog.V(5).InfoS("Pod doesn't tolerate nodes taint, count mismatch",
+				"pod", klog.KObj(pod),
+				"nodeName", nodeName,
+			)
+		}
+	}
+	return false
 }

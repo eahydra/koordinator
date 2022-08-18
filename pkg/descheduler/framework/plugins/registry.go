@@ -18,13 +18,16 @@ package plugins
 
 import (
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework/plugins/defaultevictor"
+	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework/plugins/nodeutilization"
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework/plugins/removepodsviolatingnodeaffinity"
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework/runtime"
 )
 
 func NewInTreeRegistry() runtime.Registry {
 	return runtime.Registry{
-		removepodsviolatingnodeaffinity.PluginName: removepodsviolatingnodeaffinity.New,
-		defaultevictor.PluginName:                  defaultevictor.New,
+		removepodsviolatingnodeaffinity.PluginName:    removepodsviolatingnodeaffinity.New,
+		nodeutilization.LowNodeUtilizationPluginName:  nodeutilization.NewLowNodeUtilization,
+		nodeutilization.HighNodeUtilizationPluginName: nodeutilization.NewHighNodeUtilization,
+		defaultevictor.PluginName:                     defaultevictor.New,
 	}
 }
