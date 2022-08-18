@@ -24,14 +24,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/clock"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	k8spodutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -50,6 +52,7 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/controllers/options"
 	evictionsutil "github.com/koordinator-sh/koordinator/pkg/descheduler/evictions"
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework"
+	podutil "github.com/koordinator-sh/koordinator/pkg/descheduler/pod"
 	utilclient "github.com/koordinator-sh/koordinator/pkg/util/client"
 )
 
@@ -66,7 +69,7 @@ type Reconciler struct {
 	eventRecorder          events.EventRecorder
 	reservationInterpreter reservation.Interpreter
 	evictorInterpreter     evictor.Interpreter
-	evictorFilter          *evictionsutil.EvictorFilter
+	podFilter              podutil.FilterFunc
 	assumedCache           *assumedCache
 	clock                  clock.Clock
 }
@@ -140,13 +143,27 @@ func newReconciler(controllerArgs *deschedulerconfig.MigrationControllerArgs, ha
 		evictionsutil.WithLabelSelector(selector),
 	)
 
+	var includedNamespaces, excludedNamespaces sets.String
+	if controllerArgs.Namespaces != nil {
+		includedNamespaces = sets.NewString(controllerArgs.Namespaces.Include...)
+		excludedNamespaces = sets.NewString(controllerArgs.Namespaces.Exclude...)
+	}
+
+	podFilter, err := podutil.NewOptions().
+		WithFilter(evictorFilter.Filter).
+		WithNamespaces(includedNamespaces).
+		WithoutNamespaces(excludedNamespaces).
+		BuildFilterFunc()
+
+	registerIndex(manager.GetCache())
+
 	r := &Reconciler{
 		Client:                 manager.GetClient(),
 		args:                   controllerArgs,
 		eventRecorder:          handle.EventRecorder(),
 		reservationInterpreter: reservationInterpreter,
 		evictorInterpreter:     evictorInterpreter,
-		evictorFilter:          evictorFilter,
+		podFilter:              podFilter,
 		assumedCache:           newAssumedCache(),
 		clock:                  clock.RealClock{},
 	}
@@ -163,11 +180,44 @@ func (r *Reconciler) Name() string {
 
 // Filter checks if a pod can be evicted
 func (r *Reconciler) Filter(pod *corev1.Pod) bool {
-	return r.evictorFilter.Filter(pod)
+	if !r.filterExistingPodMigrationJob(pod) {
+		return false
+	}
+	return r.podFilter(pod)
+}
+
+func (r *Reconciler) filterExistingPodMigrationJob(pod *corev1.Pod) bool {
+	jobList := &sev1alpha1.PodMigrationJobList{}
+	opts := &client.ListOptions{FieldSelector: fields.OneTermEqualSelector(podRefUUIDIndex, string(pod.UID))}
+	err := r.Client.List(context.TODO(), jobList, opts, utilclient.DisableDeepCopy)
+	if err != nil {
+		return false
+	}
+	if len(jobList.Items) == 0 {
+		return true
+	}
+	for i := range jobList.Items {
+		job := &jobList.Items[i]
+		switch job.Status.Phase {
+		case "", sev1alpha1.PodMigrationJobPending, sev1alpha1.PodMigrationJobRunning:
+			return false
+		}
+	}
+	return true
 }
 
 // Evict evicts a pod (no pre-check performed)
 func (r *Reconciler) Evict(ctx context.Context, pod *corev1.Pod, evictOptions framework.EvictOptions) bool {
+	if r.args.DryRun {
+		klog.Infof("%s Try to evict pod %s/%s by dryRun mode caused by %s", evictOptions.PluginName, pod.Namespace, pod.Name, evictOptions.Reason)
+		return true
+	}
+
+	if !r.Filter(pod) {
+		klog.Errorf("Pod %s/%s can not be evicted", pod.Namespace, pod.Name)
+		return false
+	}
+
 	if evictOptions.DeleteOptions == nil {
 		evictOptions.DeleteOptions = r.args.DefaultDeleteOptions
 	}
@@ -298,6 +348,10 @@ func (r *Reconciler) doMigrate(ctx context.Context, job *sev1alpha1.PodMigration
 		job.Status.Phase = sev1alpha1.PodMigrationJobRunning
 	}
 
+	if aborted, err := r.abortJobIfPodFilterFailed(ctx, job); aborted {
+		return reconcile.Result{}, err
+	}
+
 	if job.Spec.Mode == sev1alpha1.PodMigrationJobModeEvictionDirectly {
 		return r.evictPodDirectly(ctx, job)
 	}
@@ -350,6 +404,10 @@ func (r *Reconciler) doMigrate(ctx context.Context, job *sev1alpha1.PodMigration
 	}
 
 	if err = r.syncReservationScheduleSuccess(ctx, job, reservationObj); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	if aborted, err := r.abortJobIfReserveOnSameNode(ctx, job, reservationObj); aborted || err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -420,6 +478,30 @@ func (r *Reconciler) abortJobIfTimeout(ctx context.Context, job *sev1alpha1.PodM
 	return true, err
 }
 
+func (r *Reconciler) abortJobIfPodFilterFailed(ctx context.Context, job *sev1alpha1.PodMigrationJob) (bool, error) {
+	pod := &corev1.Pod{}
+	podNamespacedName := types.NamespacedName{Namespace: job.Spec.PodRef.Namespace, Name: job.Spec.PodRef.Name}
+	err := r.Client.Get(ctx, podNamespacedName, pod)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			err = r.abortJobByMissingPod(ctx, job, podNamespacedName)
+			return true, err
+		}
+		return false, err
+	}
+	if !r.podFilter(pod) {
+		job.Status.Phase = sev1alpha1.PodMigrationJobFailed
+		job.Status.Reason = sev1alpha1.PodMigrationJobReasonForbiddenMigratePod
+		job.Status.Message = fmt.Sprintf("Pod %q is forbidden to migrate because it does not meet the requirements", podNamespacedName)
+		err = r.Status().Update(ctx, job)
+		if err == nil {
+			r.eventRecorder.Eventf(job, nil, corev1.EventTypeWarning, sev1alpha1.PodMigrationJobReasonForbiddenMigratePod, "Migrating", job.Status.Message)
+		}
+		return true, err
+	}
+	return false, nil
+}
+
 func (r *Reconciler) abortJobByMissingPod(ctx context.Context, job *sev1alpha1.PodMigrationJob, podNamespacedName types.NamespacedName) error {
 	job.Status.Phase = sev1alpha1.PodMigrationJobFailed
 	job.Status.Reason = sev1alpha1.PodMigrationJobReasonMissingPod
@@ -456,7 +538,11 @@ func (r *Reconciler) abortJobByReservationBound(ctx context.Context, job *sev1al
 	job.Status.Phase = sev1alpha1.PodMigrationJobFailed
 	job.Status.Reason = sev1alpha1.PodMigrationJobReasonReservationBoundByAnotherPod
 	job.Status.Message = "Reservation is already bound by another Pod"
-	return r.Client.Status().Update(ctx, job)
+	err := r.Client.Status().Update(ctx, job)
+	if err == nil {
+		r.eventRecorder.Eventf(job, nil, corev1.EventTypeWarning, sev1alpha1.PodMigrationJobReasonReservationBoundByAnotherPod, "Migrating", job.Status.Message)
+	}
+	return err
 }
 
 func (r *Reconciler) abortJobIfReservationBoundByAnotherPod(ctx context.Context, job *sev1alpha1.PodMigrationJob, pod *corev1.Pod) (bool, error) {
@@ -486,6 +572,25 @@ func (r *Reconciler) abortJobIfReservationBoundByAnotherPod(ctx context.Context,
 		}
 	}
 	return false, nil
+}
+
+func (r *Reconciler) abortJobIfReserveOnSameNode(ctx context.Context, job *sev1alpha1.PodMigrationJob, reservationObj reservation.Object) (bool, error) {
+	pod := &corev1.Pod{}
+	podNamespacedName := types.NamespacedName{Namespace: job.Spec.PodRef.Namespace, Name: job.Spec.PodRef.Name}
+	err := r.Client.Get(ctx, podNamespacedName, pod)
+	if err != nil {
+		return false, err
+	}
+	scheduledNodeName := reservationObj.GetScheduledNodeName()
+	if scheduledNodeName == "" || scheduledNodeName != pod.Spec.NodeName {
+		return false, nil
+	}
+
+	job.Status.Phase = sev1alpha1.PodMigrationJobFailed
+	job.Status.Reason = sev1alpha1.PodMigrationJobReasonReservedOnSameNode
+	job.Status.Message = ""
+	err = r.Client.Status().Update(ctx, job)
+	return true, err
 }
 
 func (r *Reconciler) abortJobByReservationUnschedulable(ctx context.Context, job *sev1alpha1.PodMigrationJob, reservationObj reservation.Object) error {
@@ -717,7 +822,7 @@ func (r *Reconciler) waitForPendingPodScheduled(ctx context.Context, job *sev1al
 		return reconcile.Result{}, err
 	}
 
-	_, podCondition := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
+	_, podCondition := k8spodutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
 	if podCondition == nil || podCondition.Status == corev1.ConditionFalse {
 		if aborted, err := r.abortJobIfReservationBoundByAnotherPod(ctx, job, pod); aborted {
 			return reconcile.Result{}, err

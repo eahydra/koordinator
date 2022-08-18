@@ -382,6 +382,7 @@ func autoConvert_v1alpha2_MigrationControllerArgs_To_config_MigrationControllerA
 	out.EvictSystemCriticalPods = in.EvictSystemCriticalPods
 	out.IgnorePvcPods = in.IgnorePvcPods
 	out.LabelSelector = (*v1.LabelSelector)(unsafe.Pointer(in.LabelSelector))
+	out.Namespaces = (*config.Namespaces)(unsafe.Pointer(in.Namespaces))
 	out.FlowControlQPS = in.FlowControlQPS
 	out.FlowControlBurst = in.FlowControlBurst
 	out.MaxMigratingPerNode = (*int32)(unsafe.Pointer(in.MaxMigratingPerNode))
@@ -409,6 +410,7 @@ func autoConvert_config_MigrationControllerArgs_To_v1alpha2_MigrationControllerA
 	out.EvictSystemCriticalPods = in.EvictSystemCriticalPods
 	out.IgnorePvcPods = in.IgnorePvcPods
 	out.LabelSelector = (*v1.LabelSelector)(unsafe.Pointer(in.LabelSelector))
+	out.Namespaces = (*Namespaces)(unsafe.Pointer(in.Namespaces))
 	out.FlowControlQPS = in.FlowControlQPS
 	out.FlowControlBurst = in.FlowControlBurst
 	out.MaxMigratingPerNode = (*int32)(unsafe.Pointer(in.MaxMigratingPerNode))

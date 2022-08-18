@@ -173,6 +173,8 @@ const (
 	PodMigrationJobReasonReservationExpired           = "ReservationExpired"
 	PodMigrationJobReasonReservationBoundByAnotherPod = "ReservationBoundByAnotherPod"
 	PodMigrationJobReasonUnschedulable                = "Unschedulable"
+	PodMigrationJobReasonReservedOnSameNode           = "ReservedOnSameNode"
+	PodMigrationJobReasonForbiddenMigratePod          = "ForbiddenMigratePod"
 	PodMigrationJobReasonMissingPod                   = "MissingPod"
 	PodMigrationJobReasonMissingReservation           = "MissingReservation"
 	PodMigrationJobReasonPreempting                   = "Preempting"

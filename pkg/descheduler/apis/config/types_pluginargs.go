@@ -108,6 +108,9 @@ type MigrationControllerArgs struct {
 	// Any pod matching the label selector is considered evictable.
 	LabelSelector *metav1.LabelSelector
 
+	// Namespaces carries a list of included/excluded namespaces
+	Namespaces *Namespaces
+
 	// FlowControlQPS controls the number of arbitrations per second
 	FlowControlQPS string
 	// FlowControlBurst is the maximum number of tokens

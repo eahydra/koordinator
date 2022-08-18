@@ -57,6 +57,11 @@ func ValidateMigrationControllerArgs(path *field.Path, args *deschedulerconfig.M
 		allErrs = append(allErrs, metav1validation.ValidateLabelSelector(args.LabelSelector, field.NewPath("labelSelector"))...)
 	}
 
+	// At most one of include/exclude can be set
+	if args.Namespaces != nil && len(args.Namespaces.Include) > 0 && len(args.Namespaces.Exclude) > 0 {
+		allErrs = append(allErrs, field.Invalid(path.Child("namespaces"), args.Namespaces, "only one of Include/Exclude namespaces can be set"))
+	}
+
 	if args.MaxConcurrentReconciles < 1 {
 		allErrs = append(allErrs, field.Invalid(path.Child("maxConcurrentReconciles"), args.MaxConcurrentReconciles, "maxConcurrentReconciles should be greater than or equal to 1"))
 	}
