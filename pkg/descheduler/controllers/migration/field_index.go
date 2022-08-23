@@ -23,15 +23,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/koordinator-sh/koordinator/apis/extension"
 	sev1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
 )
 
 const (
-	podRefUUIDIndex = "podRef.uuid"
+	indexPodUUID      = "migration.pod.uuid"
+	indexPodNamespace = "migration.pod.namespace"
+)
+
+const (
+	LabelMigrateFromNode = extension.SchedulingDomainPrefix + "/migrate-from-node"
 )
 
 func registerIndex(c cache.Cache) {
-	err := c.IndexField(context.Background(), &sev1alpha1.PodMigrationJob{}, podRefUUIDIndex, func(obj client.Object) []string {
+	err := c.IndexField(context.Background(), &sev1alpha1.PodMigrationJob{}, indexPodUUID, func(obj client.Object) []string {
 		migrationJob, ok := obj.(*sev1alpha1.PodMigrationJob)
 		if !ok {
 			return []string{}
@@ -42,6 +48,19 @@ func registerIndex(c cache.Cache) {
 		return []string{string(migrationJob.Spec.PodRef.UID)}
 	})
 	if err != nil {
-		klog.Fatalf("Failed to register field index, err: %v", err)
+		klog.Fatalf("Failed to register field index %s, err: %v", indexPodUUID, err)
+	}
+	err = c.IndexField(context.Background(), &sev1alpha1.PodMigrationJob{}, indexPodNamespace, func(obj client.Object) []string {
+		migrationJob, ok := obj.(*sev1alpha1.PodMigrationJob)
+		if !ok {
+			return []string{}
+		}
+		if migrationJob.Spec.PodRef == nil {
+			return []string{}
+		}
+		return []string{migrationJob.Spec.PodRef.Namespace}
+	})
+	if err != nil {
+		klog.Fatalf("Failed to register field index %s, err: %v", indexPodNamespace, err)
 	}
 }

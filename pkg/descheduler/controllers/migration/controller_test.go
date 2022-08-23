@@ -136,7 +136,7 @@ func newTestReconciler() *Reconciler {
 		eventRecorder:          record.NewEventRecorderAdapter(recorder),
 		reservationInterpreter: nil,
 		evictorInterpreter:     nil,
-		podFilter:              podFilter,
+		unsolvablePodFilter:    podFilter,
 		assumedCache:           newAssumedCache(),
 		clock:                  clock.RealClock{},
 	}
