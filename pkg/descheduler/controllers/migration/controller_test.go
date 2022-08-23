@@ -44,6 +44,7 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/controllers/migration/util"
 	evictionsutil "github.com/koordinator-sh/koordinator/pkg/descheduler/evictions"
 	"github.com/koordinator-sh/koordinator/pkg/descheduler/framework"
+	podutil "github.com/koordinator-sh/koordinator/pkg/descheduler/pod"
 )
 
 type fakeEvictionInterpreter struct {
@@ -125,13 +126,17 @@ func newTestReconciler() *Reconciler {
 		false, false, false, false,
 	)
 
+	podFilter, err := podutil.NewOptions().
+		WithFilter(evictorFilter.Filter).
+		BuildFilterFunc()
+
 	return &Reconciler{
 		Client:                 client,
 		args:                   &migrationJobControllerArgs,
 		eventRecorder:          record.NewEventRecorderAdapter(recorder),
 		reservationInterpreter: nil,
 		evictorInterpreter:     nil,
-		evictorFilter:          evictorFilter,
+		podFilter:              podFilter,
 		assumedCache:           newAssumedCache(),
 		clock:                  clock.RealClock{},
 	}
