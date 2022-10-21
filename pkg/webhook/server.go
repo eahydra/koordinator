@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
+	"github.com/koordinator-sh/koordinator/pkg/webhook/services"
 	webhookutil "github.com/koordinator-sh/koordinator/pkg/webhook/util"
 	webhookcontroller "github.com/koordinator-sh/koordinator/pkg/webhook/util/controller"
 	"github.com/koordinator-sh/koordinator/pkg/webhook/util/health"
@@ -95,6 +96,10 @@ func SetupWithManager(mgr manager.Manager) error {
 
 	// register health handler
 	server.Register("/healthz", &health.Handler{})
+
+	services.InstallAPIHandler(server, func() bool {
+		return false
+	})
 
 	return nil
 }
