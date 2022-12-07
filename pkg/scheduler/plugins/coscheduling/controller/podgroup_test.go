@@ -36,7 +36,6 @@ import (
 	pgfake "sigs.k8s.io/scheduler-plugins/pkg/generated/clientset/versioned/fake"
 	schedinformer "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions"
 
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/core"
 )
 
@@ -270,7 +269,7 @@ func setUp(ctx context.Context, podNames []string, pgName string, podPhase v1.Po
 	podInformer := informerFactory.Core().V1().Pods()
 	pgInformer := pgInformerFactory.Scheduling().V1alpha1().PodGroups()
 
-	pgMgr := core.NewPodGroupManager(pgClient, pgInformerFactory, informerFactory, &config.CoschedulingArgs{DefaultTimeout: &metav1.Duration{Duration: time.Second}})
+	pgMgr := core.NewPodGroupManager(pgClient, pgInformerFactory, informerFactory, &metav1.Duration{Duration: time.Second})
 	ctrl := NewPodGroupController(pgInformer, podInformer, pgClient, pgMgr, 1)
 	return ctrl, kubeClient, pgClient
 }

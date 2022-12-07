@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/pointer"
 	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
@@ -32,8 +34,6 @@ import (
 	pgformers "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
 )
 
 var fakeTimeNowFn = func() time.Time {
@@ -44,11 +44,13 @@ var fakeTimeNowFn = func() time.Time {
 
 func TestGangCache_OnPodAdd(t *testing.T) {
 	tests := []struct {
-		name              string
-		pods              []*corev1.Pod
-		podGroups         []*v1alpha1.PodGroup
-		wantCache         map[string]*Gang
-		wantedPodGroupMap map[string]*v1alpha1.PodGroup
+		name               string
+		pods               []*corev1.Pod
+		podGroups          []*v1alpha1.PodGroup
+		wantCache          map[string]*Gang
+		wantPodGroupMap    map[string]*v1alpha1.PodGroup
+		wantGetPodGroupErr bool
+		wantParseErr       bool
 	}{
 		{
 			name:      "add invalid pod",
@@ -81,14 +83,10 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 			wantCache: map[string]*Gang{
 				"default/test": {
 					Name:               "default/test",
-					CreateTime:         fakeTimeNowFn(),
-					WaitTime:           0,
-					Mode:               extension.GangModeStrict,
-					ScheduleCycleValid: true,
-					ScheduleCycle:      1,
-					GangFrom:           GangFromPodAnnotation,
-					HasGangInit:        false,
-					Children: map[string]*corev1.Pod{
+					CreationTimestamp:  fakeTimeNowFn(),
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					pods: map[string]*corev1.Pod{
 						"default/crdPod": {
 							ObjectMeta: metav1.ObjectMeta{
 								Name:      "crdPod",
@@ -97,9 +95,9 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 							},
 						},
 					},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ChildrenScheduleRoundMap: map[string]int{},
+					waitingPods:       map[string]*corev1.Pod{},
+					boundPods:         map[string]*corev1.Pod{},
+					podScheduleCycles: map[string]int{},
 				},
 			},
 		},
@@ -140,16 +138,18 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 			},
 			wantCache: map[string]*Gang{
 				"default/ganga": {
-					Name:              "default/ganga",
-					WaitTime:          30 * time.Second,
-					CreateTime:        fakeTimeNowFn(),
-					Mode:              extension.GangModeNonStrict,
-					MinRequiredNumber: 2,
-					TotalChildrenNum:  2,
-					GangGroup:         []string{"default/ganga", "default/gangb"},
-					HasGangInit:       true,
-					GangFrom:          GangFromPodAnnotation,
-					Children: map[string]*corev1.Pod{
+					Name: "default/ganga",
+					Spec: GangSpec{
+						Mode:        extension.GangModeNonStrict,
+						MinMember:   2,
+						TotalMember: 2,
+						Groups:      []string{"default/ganga", "default/gangb"},
+						WaitTime:    30 * time.Second,
+						GangFrom:    GangFromPodAnnotation,
+					},
+					SpecInitialized:   true,
+					CreationTimestamp: fakeTimeNowFn(),
+					pods: map[string]*corev1.Pod{
 						"default/pod1": {
 							ObjectMeta: metav1.ObjectMeta{
 								Namespace: "default",
@@ -179,8 +179,8 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 							},
 						},
 					},
-					WaitingForBindChildren: map[string]*corev1.Pod{},
-					BoundChildren: map[string]*corev1.Pod{
+					waitingPods: map[string]*corev1.Pod{},
+					boundPods: map[string]*corev1.Pod{
 						"default/pod1": {
 							ObjectMeta: metav1.ObjectMeta{
 								Namespace: "default",
@@ -198,10 +198,10 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 							},
 						},
 					},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					OnceResourceSatisfied:    true,
-					ChildrenScheduleRoundMap: map[string]int{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					resourceSatisfied:  true,
+					podScheduleCycles:  map[string]int{},
 				},
 			},
 			podGroups: []*v1alpha1.PodGroup{
@@ -221,7 +221,7 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 					},
 				},
 			},
-			wantedPodGroupMap: map[string]*v1alpha1.PodGroup{
+			wantPodGroupMap: map[string]*v1alpha1.PodGroup{
 				"ganga": {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:              "ganga",
@@ -239,7 +239,7 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 			},
 		},
 		{
-			name: "add pods announcing Gang in Annotation way,but with illegal args",
+			name: "add pods announcing Gang in Annotation way,but with illegal args A",
 			pods: []*corev1.Pod{
 				// pod3 announce GangB with illegal minNum,
 				// so that gangA's info depends on the next pod's Annotations
@@ -263,8 +263,8 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 							extension.AnnotationGangName:     "gangb",
 							extension.AnnotationGangMinNum:   "2",
 							extension.AnnotationGangTotalNum: "1",
-							extension.AnnotationGangMode:     "WenShiqi222",
-							extension.AnnotationGangWaitTime: "WenShiqi222",
+							extension.AnnotationGangMode:     "UnsupportedMode",
+							extension.AnnotationGangWaitTime: "InvalidWaitTime",
 							extension.AnnotationGangGroups:   "ganga,gangx",
 						},
 					},
@@ -273,15 +273,18 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 			wantCache: map[string]*Gang{
 				"default/gangb": {
 					Name:              "default/gangb",
-					WaitTime:          0,
-					CreateTime:        fakeTimeNowFn(),
-					Mode:              extension.GangModeStrict,
-					MinRequiredNumber: 2,
-					TotalChildrenNum:  2,
-					GangGroup:         []string{},
-					HasGangInit:       true,
-					GangFrom:          GangFromPodAnnotation,
-					Children: map[string]*corev1.Pod{
+					CreationTimestamp: fakeTimeNowFn(),
+					Spec: GangSpec{
+						Mode:        extension.GangModeStrict,
+						MinMember:   0,
+						TotalMember: 0,
+						Groups:      []string{"default/gangb"},
+						WaitTime:    0,
+						ParseError:  nil,
+						GangFrom:    GangFromPodAnnotation,
+					},
+					SpecInitialized: true,
+					pods: map[string]*corev1.Pod{
 						"default/pod3": {
 							ObjectMeta: metav1.ObjectMeta{
 								Namespace: "default",
@@ -300,36 +303,23 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 									extension.AnnotationGangName:     "gangb",
 									extension.AnnotationGangMinNum:   "2",
 									extension.AnnotationGangTotalNum: "1",
-									extension.AnnotationGangMode:     "WenShiqi222",
-									extension.AnnotationGangWaitTime: "WenShiqi222",
+									extension.AnnotationGangMode:     "UnsupportedMode",
+									extension.AnnotationGangWaitTime: "InvalidWaitTime",
 									extension.AnnotationGangGroups:   "ganga,gangx",
 								},
 							},
 						},
 					},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					ChildrenScheduleRoundMap: map[string]int{},
+					waitingPods:        map[string]*corev1.Pod{},
+					boundPods:          map[string]*corev1.Pod{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					podScheduleCycles:  map[string]int{},
 				},
 			},
-			wantedPodGroupMap: map[string]*v1alpha1.PodGroup{
-				"gangb": {
-					ObjectMeta: metav1.ObjectMeta{
-						Name:              "gangb",
-						Namespace:         "default",
-						CreationTimestamp: metav1.Time{Time: fakeTimeNowFn()},
-						Annotations: map[string]string{
-							PodGroupFromPodAnnotation: "true",
-						},
-					},
-					Spec: v1alpha1.PodGroupSpec{
-						ScheduleTimeoutSeconds: pointer.Int32(0),
-						MinMember:              int32(2),
-					},
-				},
-			},
+			wantPodGroupMap:    nil,
+			wantGetPodGroupErr: true,
+			wantParseErr:       true,
 		},
 		{
 			name: "add pods announcing Gang in Annotation way,but with illegal args",
@@ -364,15 +354,14 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 			wantCache: map[string]*Gang{
 				"default/gangc": {
 					Name:              "default/gangc",
-					WaitTime:          0,
-					CreateTime:        fakeTimeNowFn(),
-					Mode:              extension.GangModeStrict,
-					MinRequiredNumber: 0,
-					TotalChildrenNum:  0,
-					GangGroup:         []string{},
-					HasGangInit:       true,
-					GangFrom:          GangFromPodAnnotation,
-					Children: map[string]*corev1.Pod{
+					CreationTimestamp: fakeTimeNowFn(),
+					Spec: GangSpec{
+						Mode:     extension.GangModeStrict,
+						GangFrom: GangFromPodAnnotation,
+						Groups:   []string{"default/gangc"},
+					},
+					SpecInitialized: true,
+					pods: map[string]*corev1.Pod{
 						"default/pod5": {
 							ObjectMeta: metav1.ObjectMeta{
 								Namespace: "default",
@@ -386,23 +375,22 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 							},
 						},
 					},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					ChildrenScheduleRoundMap: map[string]int{},
+					waitingPods:        map[string]*corev1.Pod{},
+					boundPods:          map[string]*corev1.Pod{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					podScheduleCycles:  map[string]int{},
 				},
 				"default/gangd": {
 					Name:              "default/gangd",
-					WaitTime:          0,
-					CreateTime:        fakeTimeNowFn(),
-					Mode:              extension.GangModeStrict,
-					MinRequiredNumber: 0,
-					TotalChildrenNum:  0,
-					GangGroup:         []string{},
-					HasGangInit:       true,
-					GangFrom:          GangFromPodAnnotation,
-					Children: map[string]*corev1.Pod{
+					CreationTimestamp: fakeTimeNowFn(),
+					Spec: GangSpec{
+						Mode:     extension.GangModeStrict,
+						GangFrom: GangFromPodAnnotation,
+						Groups:   []string{"default/gangd"},
+					},
+					SpecInitialized: true,
+					pods: map[string]*corev1.Pod{
 						"default/pod6": {
 							ObjectMeta: metav1.ObjectMeta{
 								Namespace: "default",
@@ -416,58 +404,26 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 							},
 						},
 					},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					ChildrenScheduleRoundMap: map[string]int{},
+					waitingPods:        map[string]*corev1.Pod{},
+					boundPods:          map[string]*corev1.Pod{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					podScheduleCycles:  map[string]int{},
 				},
 			},
-			wantedPodGroupMap: map[string]*v1alpha1.PodGroup{
-				"gangc": {
-					ObjectMeta: metav1.ObjectMeta{
-						Name:              "gangc",
-						Namespace:         "default",
-						CreationTimestamp: metav1.Time{Time: fakeTimeNowFn()},
-						Annotations: map[string]string{
-							PodGroupFromPodAnnotation: "true",
-						},
-					},
-					Spec: v1alpha1.PodGroupSpec{
-						ScheduleTimeoutSeconds: pointer.Int32(0),
-						MinMember:              int32(0),
-					},
-				},
-				"gangd": {
-					ObjectMeta: metav1.ObjectMeta{
-						Name:              "gangd",
-						Namespace:         "default",
-						CreationTimestamp: metav1.Time{Time: fakeTimeNowFn()},
-						Annotations: map[string]string{
-							PodGroupFromPodAnnotation: "true",
-						},
-					},
-					Spec: v1alpha1.PodGroupSpec{
-						ScheduleTimeoutSeconds: pointer.Int32(0),
-						MinMember:              int32(0),
-					},
-				},
-			},
+			wantPodGroupMap:    nil,
+			wantGetPodGroupErr: true,
+			wantParseErr:       true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			preTimeNowFn := timeNowFn
-			defer func() {
-				timeNowFn = preTimeNowFn
-			}()
-			timeNowFn = fakeTimeNowFn
 			pgClientSet := fakepgclientset.NewSimpleClientset()
 			pgInformerFactory := pgformers.NewSharedInformerFactory(pgClientSet, 0)
 			pgInformer := pgInformerFactory.Scheduling().V1alpha1().PodGroups()
 			pglister := pgInformer.Lister()
-			gangCache := NewGangCache(&config.CoschedulingArgs{}, nil, pglister, pgClientSet)
+			gangCache := NewGangCache(0, nil, pglister, pgClientSet)
 			for _, pg := range tt.podGroups {
 				err := retry.OnError(
 					retry.DefaultRetry,
@@ -484,8 +440,20 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 			for _, pod := range tt.pods {
 				gangCache.onPodAdd(pod)
 			}
+
+			var parseErrs []error
+			for _, v := range gangCache.gangItems {
+				if v.SpecInitialized && v.Spec.ParseError != nil {
+					parseErrs = append(parseErrs, v.Spec.ParseError)
+					v.Spec.ParseError = nil
+				}
+			}
+			if (parseErrs != nil) != tt.wantParseErr {
+				t.Errorf("expect wantParseErr=%v but got %v", tt.wantParseErr, utilerrors.NewAggregate(parseErrs))
+			}
 			assert.Equal(t, tt.wantCache, gangCache.gangItems)
-			for pgKey, targetPg := range tt.wantedPodGroupMap {
+
+			for pgKey, targetPg := range tt.wantPodGroupMap {
 				var pg *v1alpha1.PodGroup
 				err := retry.OnError(
 					retry.DefaultRetry,
@@ -495,8 +463,8 @@ func TestGangCache_OnPodAdd(t *testing.T) {
 						pg, err = pgClientSet.SchedulingV1alpha1().PodGroups("default").Get(context.TODO(), pgKey, metav1.GetOptions{})
 						return err
 					})
-				if err != nil {
-					t.Errorf("retry pgClient Get PodGroup err: %v", err)
+				if (err != nil) != tt.wantGetPodGroupErr {
+					t.Errorf("expect wantGetPodGroupErr: %v, but got %v", tt.wantGetPodGroupErr, err)
 				} else {
 					targetPg.Status.ScheduleStartTime = metav1.Time{}
 					pg.Status.ScheduleStartTime = metav1.Time{}
@@ -594,7 +562,7 @@ func TestGangCache_OnPodDelete(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: "default",
-						Name:      "gangB",
+						Name:      "GangB",
 					},
 					Spec: v1alpha1.PodGroupSpec{
 						MinMember:              4,
@@ -603,29 +571,31 @@ func TestGangCache_OnPodDelete(t *testing.T) {
 				},
 			},
 			wantCache: map[string]*Gang{
-				"default/gangB": {
-					Name:                     "default/gangB",
-					WaitTime:                 10 * time.Second,
-					CreateTime:               fakeTimeNowFn(),
-					Mode:                     extension.GangModeStrict,
-					MinRequiredNumber:        4,
-					TotalChildrenNum:         4,
-					GangGroup:                []string{},
-					HasGangInit:              true,
-					GangFrom:                 GangFromPodGroupCrd,
-					Children:                 map[string]*corev1.Pod{},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					ChildrenScheduleRoundMap: map[string]int{},
+				"default/GangB": {
+					Name: "default/GangB",
+					Spec: GangSpec{
+						Mode:        extension.GangModeStrict,
+						WaitTime:    10 * time.Second,
+						MinMember:   4,
+						TotalMember: 4,
+						Groups:      []string{"default/GangB"},
+						GangFrom:    GangFromPodGroup,
+					},
+					SpecInitialized:    true,
+					CreationTimestamp:  fakeTimeNowFn(),
+					pods:               map[string]*corev1.Pod{},
+					waitingPods:        map[string]*corev1.Pod{},
+					boundPods:          map[string]*corev1.Pod{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					podScheduleCycles:  map[string]int{},
 				},
 			},
 			wantPodGroup: map[string]*v1alpha1.PodGroup{
-				"gangB": {
+				"GangB": {
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: "default",
-						Name:      "gangB",
+						Name:      "GangB",
 					},
 					Spec: v1alpha1.PodGroupSpec{
 						MinMember:              4,
@@ -637,16 +607,11 @@ func TestGangCache_OnPodDelete(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			preTimeNowFn := timeNowFn
-			defer func() {
-				timeNowFn = preTimeNowFn
-			}()
-			timeNowFn = fakeTimeNowFn
 			pgClient := fakepgclientset.NewSimpleClientset()
 			pgInformerFactory := pgformers.NewSharedInformerFactory(pgClient, 0)
 			pgInformer := pgInformerFactory.Scheduling().V1alpha1().PodGroups()
 			pglister := pgInformer.Lister()
-			gangCache := NewGangCache(&config.CoschedulingArgs{}, nil, pglister, pgClient)
+			gangCache := NewGangCache(0, nil, pglister, pgClient)
 			for _, pg := range tt.podGroups {
 				err := retry.OnError(
 					retry.DefaultRetry,
@@ -701,9 +666,10 @@ func TestGangCache_OnPodDelete(t *testing.T) {
 func TestGangCache_OnPodGroupAdd(t *testing.T) {
 	waitTime := int32(300)
 	tests := []struct {
-		name      string
-		pgs       []*v1alpha1.PodGroup
-		wantCache map[string]*Gang
+		name         string
+		pgs          []*v1alpha1.PodGroup
+		wantCache    map[string]*Gang
+		wantParseErr bool
 	}{
 		{
 			name: "update podGroup with annotations that created from annotations",
@@ -744,21 +710,23 @@ func TestGangCache_OnPodGroupAdd(t *testing.T) {
 			},
 			wantCache: map[string]*Gang{
 				"default/gangA": {
-					Name:                     "default/gangA",
-					WaitTime:                 300 * time.Second,
-					CreateTime:               fakeTimeNowFn(),
-					Mode:                     extension.GangModeNonStrict,
-					MinRequiredNumber:        2,
-					TotalChildrenNum:         2,
-					GangGroup:                []string{"default/gangA", "default/gangB"},
-					HasGangInit:              true,
-					GangFrom:                 GangFromPodGroupCrd,
-					Children:                 map[string]*corev1.Pod{},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					ChildrenScheduleRoundMap: map[string]int{},
+					Name:              "default/gangA",
+					CreationTimestamp: fakeTimeNowFn(),
+					Spec: GangSpec{
+						Mode:        extension.GangModeNonStrict,
+						WaitTime:    300 * time.Second,
+						MinMember:   2,
+						TotalMember: 2,
+						Groups:      []string{"default/gangA", "default/gangB"},
+						GangFrom:    GangFromPodGroup,
+					},
+					SpecInitialized:    true,
+					pods:               map[string]*corev1.Pod{},
+					waitingPods:        map[string]*corev1.Pod{},
+					boundPods:          map[string]*corev1.Pod{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					podScheduleCycles:  map[string]int{},
 				},
 			},
 		},
@@ -770,7 +738,7 @@ func TestGangCache_OnPodGroupAdd(t *testing.T) {
 						Namespace: "default",
 						Name:      "gangA",
 						Annotations: map[string]string{
-							extension.AnnotationGangMode:     "WenShiqi222",
+							extension.AnnotationGangMode:     "UnsupportedMode",
 							extension.AnnotationGangGroups:   "a,b",
 							extension.AnnotationGangTotalNum: "2",
 						},
@@ -783,37 +751,45 @@ func TestGangCache_OnPodGroupAdd(t *testing.T) {
 			},
 			wantCache: map[string]*Gang{
 				"default/gangA": {
-					Name:                     "default/gangA",
-					WaitTime:                 300 * time.Second,
-					CreateTime:               fakeTimeNowFn(),
-					Mode:                     extension.GangModeStrict,
-					MinRequiredNumber:        4,
-					TotalChildrenNum:         4,
-					GangGroup:                []string{},
-					HasGangInit:              true,
-					GangFrom:                 GangFromPodGroupCrd,
-					Children:                 map[string]*corev1.Pod{},
-					WaitingForBindChildren:   map[string]*corev1.Pod{},
-					BoundChildren:            map[string]*corev1.Pod{},
-					ScheduleCycleValid:       true,
-					ScheduleCycle:            1,
-					ChildrenScheduleRoundMap: map[string]int{},
+					Name:              "default/gangA",
+					CreationTimestamp: fakeTimeNowFn(),
+					Spec: GangSpec{
+						WaitTime:    300 * time.Second,
+						Mode:        extension.GangModeStrict,
+						MinMember:   4,
+						TotalMember: 4,
+						Groups:      []string{"default/gangA"},
+						GangFrom:    GangFromPodGroup,
+					},
+					SpecInitialized:    true,
+					pods:               map[string]*corev1.Pod{},
+					waitingPods:        map[string]*corev1.Pod{},
+					boundPods:          map[string]*corev1.Pod{},
+					scheduleCycleValid: true,
+					scheduleCycle:      1,
+					podScheduleCycles:  map[string]int{},
 				},
 			},
+			wantParseErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			preTimeNowFn := timeNowFn
-			defer func() {
-				timeNowFn = preTimeNowFn
-			}()
-			timeNowFn = fakeTimeNowFn
 			pgClient := fakepgclientset.NewSimpleClientset()
-			gangCache := NewGangCache(&config.CoschedulingArgs{}, nil, nil, pgClient)
+			gangCache := NewGangCache(0, nil, nil, pgClient)
 			for _, pg := range tt.pgs {
 				gangCache.onPodGroupAdd(pg)
+			}
+			var parseErrs []error
+			for _, v := range gangCache.gangItems {
+				if v.SpecInitialized && v.Spec.ParseError != nil {
+					parseErrs = append(parseErrs, v.Spec.ParseError)
+					v.Spec.ParseError = nil
+				}
+			}
+			if (parseErrs != nil) != tt.wantParseErr {
+				t.Errorf("expect wantParseErr=%v but got %v", tt.wantParseErr, utilerrors.NewAggregate(parseErrs))
 			}
 			assert.Equal(t, tt.wantCache, gangCache.gangItems)
 		})
@@ -822,16 +798,11 @@ func TestGangCache_OnPodGroupAdd(t *testing.T) {
 
 func TestGangCache_OnGangDelete(t *testing.T) {
 	pgClient := fakepgclientset.NewSimpleClientset()
-	preTimeNowFn := timeNowFn
-	defer func() {
-		timeNowFn = preTimeNowFn
-	}()
-	timeNowFn = fakeTimeNowFn
 
 	pgInformerFactory := pgformers.NewSharedInformerFactory(pgClient, 0)
 	pgInformer := pgInformerFactory.Scheduling().V1alpha1().PodGroups()
 	pglister := pgInformer.Lister()
-	cache := NewGangCache(&config.CoschedulingArgs{}, nil, pglister, pgClient)
+	cache := NewGangCache(0, nil, pglister, pgClient)
 
 	// case1: pg that created by crd,delete pg then will delete the gang
 	podGroup := &v1alpha1.PodGroup{
@@ -840,8 +811,8 @@ func TestGangCache_OnGangDelete(t *testing.T) {
 			Name:      "ganga",
 		},
 	}
-	gangId := util.GetId("default", "ganga")
-	cache.getGangFromCacheByGangId(gangId, true)
+	gangFullName := fmt.Sprintf("%s/%s", "default", "ganga")
+	cache.GetGang(gangFullName)
 	cache.onPodGroupDelete(podGroup)
 	assert.Equal(t, 0, len(cache.gangItems))
 
@@ -879,16 +850,19 @@ func TestGangCache_OnGangDelete(t *testing.T) {
 	}
 	cache.onPodGroupDelete(pg)
 	wantedGang := &Gang{
-		Name:              "default/gangb",
-		WaitTime:          30 * time.Second,
-		CreateTime:        fakeTimeNowFn(),
-		Mode:              extension.GangModeNonStrict,
-		MinRequiredNumber: 2,
-		TotalChildrenNum:  2,
-		GangGroup:         []string{"default/gangA", "default/gangB"},
-		HasGangInit:       true,
-		GangFrom:          GangFromPodAnnotation,
-		Children: map[string]*corev1.Pod{
+		Name: "default/gangb",
+		Spec: GangSpec{
+			Mode:        extension.GangModeNonStrict,
+			MinMember:   2,
+			TotalMember: 2,
+			Groups:      []string{"default/gangA", "default/gangB"},
+			WaitTime:    30 * time.Second,
+			ParseError:  nil,
+			GangFrom:    GangFromPodAnnotation,
+		},
+		SpecInitialized:   true,
+		CreationTimestamp: fakeTimeNowFn(),
+		pods: map[string]*corev1.Pod{
 			"default/pod1": {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -906,8 +880,8 @@ func TestGangCache_OnGangDelete(t *testing.T) {
 				},
 			},
 		},
-		WaitingForBindChildren: map[string]*corev1.Pod{},
-		BoundChildren: map[string]*corev1.Pod{
+		waitingPods: map[string]*corev1.Pod{},
+		boundPods: map[string]*corev1.Pod{
 			"default/pod1": {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -925,12 +899,12 @@ func TestGangCache_OnGangDelete(t *testing.T) {
 				},
 			},
 		},
-		ScheduleCycleValid:       true,
-		ScheduleCycle:            1,
-		OnceResourceSatisfied:    true,
-		ChildrenScheduleRoundMap: map[string]int{},
+		scheduleCycleValid: true,
+		scheduleCycle:      1,
+		resourceSatisfied:  true,
+		podScheduleCycles:  map[string]int{},
 	}
-	cacheGang := cache.getGangFromCacheByGangId("default/gangb", false)
+	cacheGang := cache.GetGang("default/gangb")
 	assert.Equal(t, wantedGang, cacheGang)
 
 }

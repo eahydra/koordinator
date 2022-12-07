@@ -36,7 +36,6 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config/validation"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/core"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
 )
 
 // Coscheduling is a plugin that schedules pods in a group.
@@ -80,7 +79,7 @@ func New(obj runtime.Object, handle framework.Handle) (framework.Plugin, error) 
 	pgInformerFactory := pgformers.NewSharedInformerFactory(pgClient, 0)
 	pgInformer := pgInformerFactory.Scheduling().V1alpha1().PodGroups()
 
-	pgMgr := core.NewPodGroupManager(pgClient, pgInformerFactory, handle.SharedInformerFactory(), args)
+	pgMgr := core.NewPodGroupManager(pgClient, pgInformerFactory, handle.SharedInformerFactory(), args.DefaultTimeout)
 	plugin := &Coscheduling{
 		args:             args,
 		frameworkHandler: handle,
@@ -106,10 +105,11 @@ func (cs *Coscheduling) Name() string {
 	return Name
 }
 
-// Less is sorting pods in the scheduling queue in the following order.
-// Firstly, compare the priorities of the two pods, the higher priority (if pod's priority is equal,then compare their KoordinatorPriority at labels )is at the front of the queue,
-// Secondly, compare creationTimestamp of two pods, if pod belongs to a Gang, then we compare creationTimestamp of the Gang, the one created first will be at the front of the queue.
-// Finally, compare pod's namespace, if pod belongs to a Gang, then we compare Gang name.
+// Less is used to sort pods in the scheduling queue in the following order.
+// 1. Compare the priorities of Pods.
+// 2. Compare the Koordinator sub-priority of Pods.
+// 3. Compare the initialization timestamps of PodGroups or Pods.
+// 4. Compare the keys of PodGroups/Pods: <namespace>/<podname>.
 func (cs *Coscheduling) Less(podInfo1, podInfo2 *framework.QueuedPodInfo) bool {
 	prio1 := corev1helpers.PodPriority(podInfo1.Pod)
 	prio2 := corev1helpers.PodPriority(podInfo2.Pod)
@@ -128,20 +128,18 @@ func (cs *Coscheduling) Less(podInfo1, podInfo2 *framework.QueuedPodInfo) bool {
 		return subPrio1 > subPrio2
 	}
 
-	creationTime1 := cs.pgMgr.GetCreatTime(podInfo1)
-	creationTime2 := cs.pgMgr.GetCreatTime(podInfo2)
+	creationTime1 := cs.pgMgr.GetCreationTimestamp(podInfo1.Pod, podInfo1.InitialAttemptTimestamp)
+	creationTime2 := cs.pgMgr.GetCreationTimestamp(podInfo2.Pod, podInfo2.InitialAttemptTimestamp)
 	if creationTime1.Equal(creationTime2) {
-		return util.GetId(podInfo1.Pod.Namespace, podInfo1.Pod.Name) < util.GetId(podInfo2.Pod.Namespace, podInfo2.Pod.Name)
+		return core.GetNamespacedName(podInfo1.Pod) < core.GetNamespacedName(podInfo2.Pod)
 	}
 	return creationTime1.Before(creationTime2)
 }
 
-// PreFilter
-// if non-strict-mode, we only do step1 and step2:
-// i.Check whether childes in Gang has met the requirements of minimum number under each Gang, and reject the pod if negative.
-// ii.Check whether the Gang has been timeout(check the pod's annotation,later introduced at Permit section) or is inited, and reject the pod if positive.
-// iii.Check whether the Gang has met the scheduleCycleValid check, and reject the pod if negative.
-// iv.Try update scheduleCycle, scheduleCycleValid, childrenScheduleRoundMap as mentioned above.
+// PreFilter performs the following validations.
+// - Whether the Gang timed out, was not initialized, or failed to initialize.
+// - Whether the total number of Pods in the Gang is less than its minMember.
+// - Whether the Gang met the scheduleCycleValid check.
 func (cs *Coscheduling) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) *framework.Status {
 	// If PreFilter fails, return framework.UnschedulableAndUnresolvable to avoid
 	// any preemption attempts.
@@ -152,11 +150,8 @@ func (cs *Coscheduling) PreFilter(ctx context.Context, state *framework.CycleSta
 	return framework.NewStatus(framework.Success, "")
 }
 
-// PostFilter
-// i. If strict-mode, we will set scheduleCycleValid to false and release all assumed pods.
-// ii. If non-strict mode, we will do nothing.
-func (cs *Coscheduling) PostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod,
-	filteredNodeStatusMap framework.NodeToStatusMap) (*framework.PostFilterResult, *framework.Status) {
+// PostFilter is used to reject a group of pods if a pod does not pass PreFilter or Filter.
+func (cs *Coscheduling) PostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, filteredNodeStatusMap framework.NodeToStatusMap) (*framework.PostFilterResult, *framework.Status) {
 	return cs.pgMgr.PostFilter(ctx, pod, cs.frameworkHandler, Name)
 }
 
@@ -165,9 +160,7 @@ func (cs *Coscheduling) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
 }
 
-// Permit
-// we will calculate all Gangs in GangGroup whether the current number of assumed-pods in each Gang meets the Gang's minimum requirement.
-// and decide whether we should let the pod wait in Permit stage or let the whole gangGroup go binding
+// Permit is the functions invoked by the framework at "Permit" extension point.
 func (cs *Coscheduling) Permit(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (*framework.Status, time.Duration) {
 	waitTime, s := cs.pgMgr.Permit(ctx, pod)
 	var retStatus *framework.Status
@@ -177,13 +170,12 @@ func (cs *Coscheduling) Permit(ctx context.Context, state *framework.CycleState,
 	case core.PodGroupNotFound:
 		return framework.NewStatus(framework.Unschedulable, "Gang not found"), 0
 	case core.Wait:
-		klog.InfoS("Pod is waiting to be scheduled at Permit stage", "gang",
-			util.GetId(pod.Namespace, util.GetGangNameByPod(pod)), "pod", klog.KObj(pod))
+		klog.InfoS("Pod is waiting to be scheduled to node", "pod", klog.KObj(pod), "gang", core.GetGangFullName(pod), "nodeName", nodeName)
 		retStatus = framework.NewStatus(framework.Wait)
 		// We will also request to move the sibling pods back to activeQ.
 		cs.pgMgr.ActivateSiblings(pod, state)
 	case core.Success:
-		cs.pgMgr.AllowGangGroup(pod, cs.frameworkHandler, Name)
+		cs.pgMgr.AllowGang(pod, cs.frameworkHandler, Name)
 		retStatus = framework.NewStatus(framework.Success)
 		waitTime = 0
 	}
@@ -195,9 +187,7 @@ func (cs *Coscheduling) Reserve(ctx context.Context, state *framework.CycleState
 	return nil
 }
 
-// Unreserve
-// i. handle the timeout gang
-// ii. do nothing when bound failed
+// Unreserve rejects all other Pods in the PodGroup when one of the pods in the group times out.
 func (cs *Coscheduling) Unreserve(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) {
 	cs.pgMgr.Unreserve(ctx, state, pod, nodeName, cs.frameworkHandler, Name)
 }

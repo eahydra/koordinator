@@ -7,64 +7,54 @@ import (
 )
 
 type GangSummary struct {
-	Name                     string         `json:"name"`
-	WaitTime                 time.Duration  `json:"waitTime"`
-	CreateTime               time.Time      `json:"createTime"`
-	Mode                     string         `json:"mode"`
-	MinRequiredNumber        int            `json:"minRequiredNumber"`
-	TotalChildrenNum         int            `json:"totalChildrenNum"`
-	GangGroup                []string       `json:"gangGroup"`
-	Children                 sets.String    `json:"children"`
-	WaitingForBindChildren   sets.String    `json:"waitingForBindChildren"`
-	BoundChildren            sets.String    `json:"boundChildren"`
-	OnceResourceSatisfied    bool           `json:"onceResourceSatisfied"`
-	ScheduleCycleValid       bool           `json:"scheduleCycleValid"`
-	ScheduleCycle            int            `json:"scheduleCycle"`
-	ChildrenScheduleRoundMap map[string]int `json:"childrenScheduleRoundMap"`
-	GangFrom                 string         `json:"gangFrom"`
-	HasGangInit              bool           `json:"hasGangInit"`
+	Name               string         `json:"name,omitempty"`
+	CreationTimestamp  time.Time      `json:"creationTimestamp"`
+	Spec               GangSpec       `json:"spec"`
+	SpecInitialized    bool           `json:"specInitialized"`
+	Pods               sets.String    `json:"pods,omitempty"`
+	WaitingPods        sets.String    `json:"waitingPods,omitempty"`
+	BoundPods          sets.String    `json:"boundPods,omitempty"`
+	ResourceSatisfied  bool           `json:"resourceSatisfied,omitempty"`
+	ScheduleCycleValid bool           `json:"scheduleCycleValid,omitempty"`
+	ScheduleCycle      int            `json:"scheduleCycle,omitempty"`
+	PodScheduleCycles  map[string]int `json:"podScheduleCycles,omitempty"`
 }
 
 func (gang *Gang) GetGangSummary() *GangSummary {
-	gangSummary := &GangSummary{
-		Children:                 sets.NewString(),
-		WaitingForBindChildren:   sets.NewString(),
-		BoundChildren:            sets.NewString(),
-		ChildrenScheduleRoundMap: make(map[string]int),
+	summary := &GangSummary{
+		Pods:              sets.NewString(),
+		WaitingPods:       sets.NewString(),
+		BoundPods:         sets.NewString(),
+		PodScheduleCycles: make(map[string]int),
 	}
 
 	if gang == nil {
-		return gangSummary
+		return summary
 	}
 
 	gang.lock.Lock()
 	defer gang.lock.Unlock()
 
-	gangSummary.Name = gang.Name
-	gangSummary.WaitTime = gang.WaitTime
-	gangSummary.CreateTime = gang.CreateTime
-	gangSummary.Mode = gang.Mode
-	gangSummary.MinRequiredNumber = gang.MinRequiredNumber
-	gangSummary.TotalChildrenNum = gang.TotalChildrenNum
-	gangSummary.OnceResourceSatisfied = gang.OnceResourceSatisfied
-	gangSummary.ScheduleCycleValid = gang.ScheduleCycleValid
-	gangSummary.ScheduleCycle = gang.ScheduleCycle
-	gangSummary.GangFrom = gang.GangFrom
-	gangSummary.HasGangInit = gang.HasGangInit
-	gangSummary.GangGroup = append(gangSummary.GangGroup, gang.GangGroup...)
+	summary.Name = gang.Name
+	summary.Spec = gang.Spec
+	summary.SpecInitialized = gang.SpecInitialized
+	summary.CreationTimestamp = gang.CreationTimestamp
+	summary.ResourceSatisfied = gang.resourceSatisfied
+	summary.ScheduleCycleValid = gang.scheduleCycleValid
+	summary.ScheduleCycle = gang.scheduleCycle
 
-	for podName := range gang.Children {
-		gangSummary.Children.Insert(podName)
+	for podName := range gang.pods {
+		summary.Pods.Insert(podName)
 	}
-	for podName := range gang.WaitingForBindChildren {
-		gangSummary.WaitingForBindChildren.Insert(podName)
+	for podName := range gang.waitingPods {
+		summary.WaitingPods.Insert(podName)
 	}
-	for podName := range gang.BoundChildren {
-		gangSummary.BoundChildren.Insert(podName)
+	for podName := range gang.boundPods {
+		summary.BoundPods.Insert(podName)
 	}
-	for key, value := range gang.ChildrenScheduleRoundMap {
-		gangSummary.ChildrenScheduleRoundMap[key] = value
+	for key, value := range gang.podScheduleCycles {
+		summary.PodScheduleCycles[key] = value
 	}
 
-	return gangSummary
+	return summary
 }

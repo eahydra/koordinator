@@ -36,8 +36,6 @@ import (
 	pginformer "sigs.k8s.io/scheduler-plugins/pkg/generated/informers/externalversions/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
 )
 
 type Mgr struct {
@@ -52,7 +50,7 @@ func NewManagerForTest() *Mgr {
 
 	podClient := clientsetfake.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(podClient, 0)
-	pgManager := NewPodGroupManager(pgClient, pgInformerFactory, informerFactory, &config.CoschedulingArgs{DefaultTimeout: &metav1.Duration{Duration: 300 * time.Second}})
+	pgManager := NewPodGroupManager(pgClient, pgInformerFactory, informerFactory, &metav1.Duration{Duration: 300 * time.Second})
 	return &Mgr{
 		pgMgr:      pgManager,
 		pgInformer: pgInformer,
@@ -107,8 +105,8 @@ func TestPlugin_PreFilter(t *testing.T) {
 		},
 		{
 			name:                 "pod belongs to a non-existing pg",
-			pod:                  st.MakePod().Name("pod2").UID("pod2").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "wenshiqi222").Obj(),
-			expectedErrorMessage: "gang has not init, gangName: gangA_ns/wenshiqi222, podName: gangA_ns/pod2",
+			pod:                  st.MakePod().Name("pod2").UID("pod2").Namespace("gangA_ns").Label(v1alpha1.PodGroupLabel, "pg2").Obj(),
+			expectedErrorMessage: `pre-filter Gang "gangA_ns/pg2" is not yet initialized`,
 			expectedChildCycleMap: map[string]int{
 				"gangA_ns/pod2": 1,
 			},
@@ -133,7 +131,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 				st.MakePod().Name("pod3-1").UID("pod3-1").Namespace("ganga_ns").Label(v1alpha1.PodGroupLabel, "ganga").Obj(),
 			},
 			pgs:                   makePg("ganga", "ganga_ns", 4, &gangACreatedTime, nil),
-			expectedErrorMessage:  "gang child pod not collect enough, gangName: ganga_ns/ganga, podName: ganga_ns/pod3",
+			expectedErrorMessage:  `pre-filter Gang "ganga_ns/ganga" cannot find enough sibling pods, current pods number: 2, minMember of Gang: 4`,
 			expectedScheduleCycle: 1,
 			expectedChildCycleMap: map[string]int{
 				"ganga_ns/pod3":   1,
@@ -171,7 +169,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 				"ganga_ns/pod6-2": 1,
 				"ganga_ns/pod6-3": 1,
 			},
-			expectedErrorMessage:       "pod's schedule cycle too large, gangName: ganga_ns/gangc, podName: ganga_ns/pod6, podCycle: 1, gangCycle: 1",
+			expectedErrorMessage:       `pre-filter pod's schedule cycle is too large, Gang "ganga_ns/gangc", podScheduleCycle: 1, scheduleCycle: 1`,
 			expectedScheduleCycleValid: true,
 		},
 		{
@@ -191,7 +189,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 				"ganga_ns/pod7-3": 1,
 			},
 			expectedScheduleCycleValid: false,
-			expectedErrorMessage:       "gang scheduleCycle not valid, gangName: ganga_ns/gangd, podName: ganga_ns/pod7",
+			expectedErrorMessage:       `pre-filter pod with Gang "ganga_ns/gangd" failed in the last cycle, and the new cycle has not started yet`,
 			shouldSetValidToFalse:      true,
 		},
 		{
@@ -252,7 +250,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 					tt.pgs.Annotations[extension.AnnotationGangMode] = extension.GangModeNonStrict
 				}
 				mgr.cache.onPodGroupAdd(tt.pgs)
-				gang = mgr.cache.getGangFromCacheByGangId(util.GetId(tt.pgs.Namespace, tt.pgs.Name), false)
+				gang = mgr.cache.GetGang(GetNamespacedName(tt.pgs))
 			}
 			ctx := context.TODO()
 
@@ -268,7 +266,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 				gang.setScheduleCycleValid(false)
 			}
 			if tt.shouldSetCycleEqualWithGlobal {
-				gang.setChildScheduleCycle(tt.pod, 1)
+				gang.setPodScheduleCycle(tt.pod, 1)
 			}
 			if tt.resourceSatisfied {
 				gang.setResourceSatisfied()
@@ -286,7 +284,7 @@ func TestPlugin_PreFilter(t *testing.T) {
 			if gang != nil && !tt.isNonStrictMode {
 				assert.Equal(t, tt.expectedScheduleCycle, gang.getScheduleCycle())
 				assert.Equal(t, tt.expectedScheduleCycleValid, gang.isScheduleCycleValid())
-				assert.Equal(t, tt.expectedChildCycleMap, gang.ChildrenScheduleRoundMap)
+				assert.Equal(t, tt.expectedChildCycleMap, gang.podScheduleCycles)
 			}
 		})
 	}
@@ -311,12 +309,6 @@ func TestPermit(t *testing.T) {
 			name:         "pod1 does not belong to any pg, allow",
 			pod:          st.MakePod().Name("pod1").UID("pod1").Namespace("ns1").Obj(),
 			wantStatus:   PodGroupNotSpecified,
-			wantWaittime: 0,
-		},
-		{
-			name:         "pod2 belongs to a non-existing pg",
-			pod:          st.MakePod().Name("pod2").UID("pod2").Namespace("ns1").Label(v1alpha1.PodGroupLabel, "gangnonexist").Obj(),
-			wantStatus:   Wait,
 			wantWaittime: 0,
 		},
 		{
@@ -479,7 +471,7 @@ func TestPostBind(t *testing.T) {
 				errors.IsTooManyRequests,
 				func() error {
 					var err error
-					pg, err = mgr.pgClient.SchedulingV1alpha1().PodGroups(tt.pod.Namespace).Get(context.TODO(), util.GetGangNameByPod(tt.pod), metav1.GetOptions{})
+					pg, err = mgr.pgClient.SchedulingV1alpha1().PodGroups(tt.pod.Namespace).Get(context.TODO(), GetGangName(tt.pod), metav1.GetOptions{})
 					return err
 				})
 			if err != nil {

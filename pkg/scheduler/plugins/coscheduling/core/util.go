@@ -1,5 +1,6 @@
 /*
 Copyright 2022 The Koordinator Authors.
+Copyright 2020 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,55 +15,71 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package util
+package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"sigs.k8s.io/scheduler-plugins/pkg/apis/scheduling/v1alpha1"
-
-	"encoding/json"
 
 	"github.com/koordinator-sh/koordinator/apis/extension"
 )
 
-func GetId(namespace, name string) string {
-	return namespace + "/" + name
+// DefaultWaitTime is 600 if ScheduleTimeoutSeconds is not specified.
+const DefaultWaitTime = 600 * time.Second
+
+func IsPodNeedGang(pod *corev1.Pod) bool {
+	return GetGangName(pod) != ""
 }
 
-func GetGangNameByPod(pod *v1.Pod) string {
-	if pod == nil {
+func GetGangName(pod *corev1.Pod) string {
+	name := GetPodGroupLabel(pod)
+	if name == "" {
+		name = extension.GetGangName(pod)
+	}
+	return name
+}
+
+// GetPodGroupLabel get pod group from pod annotations
+func GetPodGroupLabel(pod *corev1.Pod) string {
+	return pod.Labels[v1alpha1.PodGroupLabel]
+}
+
+// GetGangFullName get namespaced Gang name from pod annotations
+func GetGangFullName(pod *corev1.Pod) string {
+	gangName := GetGangName(pod)
+	if gangName == "" {
 		return ""
 	}
-	var gangName string
-	gangName = pod.Labels[v1alpha1.PodGroupLabel]
-	if gangName == "" {
-		gangName = extension.GetGangName(pod)
-	}
-	return gangName
+	return fmt.Sprintf("%s/%s", pod.Namespace, gangName)
 }
 
-func IsPodNeedGang(pod *v1.Pod) bool {
-	return GetGangNameByPod(pod) != ""
+// GetNamespacedName returns the namespaced name
+func GetNamespacedName(obj metav1.Object) string {
+	return fmt.Sprintf("%v/%v", obj.GetNamespace(), obj.GetName())
 }
 
-func ParsePgTimeoutSeconds(timeoutSeconds int32) (time.Duration, error) {
+func ParseGangTimeoutSeconds(timeoutSeconds int32) (time.Duration, error) {
 	if timeoutSeconds <= 0 {
 		return 0, fmt.Errorf("podGroup timeout value is illegal,timeout Value:%v", timeoutSeconds)
 	}
 	return time.Duration(timeoutSeconds) * time.Second, nil
 }
 
-// StringToGangGroupSlice
-// Parse gang group's annotation like :"["nsA/gangA","nsB/gangB"]"  => goLang slice : []string{"nsA/gangA"."nsB/gangB"}
-func StringToGangGroupSlice(s string) ([]string, error) {
-	gangGroup := make([]string, 0)
+// ParseGangGroups parses s into string slice with Gang full names
+func ParseGangGroups(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var gangGroup []string
 	err := json.Unmarshal([]byte(s), &gangGroup)
 	if err != nil {
-		return gangGroup, err
+		return nil, err
 	}
 	return gangGroup, nil
 }

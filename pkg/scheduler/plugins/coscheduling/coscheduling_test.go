@@ -46,7 +46,7 @@ import (
 	"github.com/koordinator-sh/koordinator/apis/extension"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/apis/config/v1beta2"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/core"
 )
 
 // gang test used
@@ -468,7 +468,7 @@ func TestPostFilter(t *testing.T) {
 			suit := newPluginTestSuit(t, nil, pgClientSet, cs)
 			gp := suit.plugin.(*Coscheduling)
 			suit.start()
-			gangId := util.GetId(tt.pod.Namespace, util.GetGangNameByPod(tt.pod))
+			gangId := core.GetGangFullName(tt.pod)
 			if tt.resourceSatisfied {
 				gp.PostBind(context.TODO(), nil, tt.pod, "test")
 			}
@@ -495,8 +495,7 @@ func TestPostFilter(t *testing.T) {
 				totalWaitingPods := 0
 				suit.Handle.IterateOverWaitingPods(
 					func(waitingPod framework.WaitingPod) {
-						waitingGangId := util.GetId(waitingPod.GetPod().Namespace,
-							util.GetGangNameByPod(waitingPod.GetPod()))
+						waitingGangId := core.GetGangFullName(waitingPod.GetPod())
 						if waitingGangId == gangId {
 							klog.Infof("waitingPod name is %v", waitingPod.GetPod().Name)
 							totalWaitingPods++
@@ -550,11 +549,6 @@ func TestPermit(t *testing.T) {
 			name: "pod1 does not belong to any pg, allow",
 			pod:  st.MakePod().Name("pod1").UID("pod1").Namespace("ns1").Obj(),
 			want: framework.Success,
-		},
-		{
-			name: "pod2 belongs to a non-existing pg",
-			pod:  st.MakePod().Name("pod2").UID("pod2").Namespace("ns1").Label(v1alpha1.PodGroupLabel, "gangnonexist").Obj(),
-			want: framework.Wait,
 		},
 		{
 			name: "pod3 belongs to gangA that doesn't have enough assumed pods",
@@ -657,10 +651,9 @@ func TestPermit(t *testing.T) {
 				totalWaitingPods := 0
 				suit.Handle.IterateOverWaitingPods(
 					func(waitingPod framework.WaitingPod) {
-						waitingGangId := util.GetId(waitingPod.GetPod().Namespace,
-							util.GetGangNameByPod(waitingPod.GetPod()))
-						if !tt.waitingGangMap[waitingGangId] {
-							t.Errorf("waitingGangMap should have gang gangid: %v ", waitingGangId)
+						waitingGangFullName := core.GetGangFullName(waitingPod.GetPod())
+						if !tt.waitingGangMap[waitingGangFullName] {
+							t.Errorf("waitingGangMap should have gang gangid: %v ", waitingGangFullName)
 						} else {
 							totalWaitingPods++
 						}
@@ -752,8 +745,7 @@ func TestUnreserve(t *testing.T) {
 				totalWaitingPods := 0
 				suit.Handle.IterateOverWaitingPods(
 					func(waitingPod framework.WaitingPod) {
-						waitingGangId := util.GetId(waitingPod.GetPod().Namespace,
-							util.GetGangNameByPod(waitingPod.GetPod()))
+						waitingGangId := core.GetGangFullName(waitingPod.GetPod())
 						if waitingGangId == gangId {
 							klog.Infof("waitingPod name is %v", waitingPod.GetPod().Name)
 							totalWaitingPods++

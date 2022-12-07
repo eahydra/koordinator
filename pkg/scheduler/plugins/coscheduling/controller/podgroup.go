@@ -43,7 +43,6 @@ import (
 	schedlister "sigs.k8s.io/scheduler-plugins/pkg/generated/listers/scheduling/v1alpha1"
 
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/core"
-	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/coscheduling/util"
 )
 
 const (
@@ -94,7 +93,7 @@ func NewPodGroupController(
 	return ctrl
 }
 
-func (ctrl PodGroupController) Name() string {
+func (ctrl *PodGroupController) Name() string {
 	return PodGroupControllerName
 }
 
@@ -149,7 +148,7 @@ func (ctrl *PodGroupController) pgUpdated(old, new interface{}) {
 // podAdded reacts to a PG creation
 func (ctrl *PodGroupController) podAdded(obj interface{}) {
 	pod := obj.(*v1.Pod)
-	pgName := util.GetGangNameByPod(pod)
+	pgName := core.GetGangName(pod)
 	if len(pgName) == 0 {
 		return
 	}
@@ -158,14 +157,12 @@ func (ctrl *PodGroupController) podAdded(obj interface{}) {
 		klog.Errorf("Error while adding pod, err: %v", err)
 		return
 	}
-	klog.Infof("Add podGroup when pod gets added, podGroup: %v, pod: %v", util.GetId(pg.Namespace, pg.Name),
-		util.GetId(pod.Namespace, pod.Name))
+	klog.Infof("Add podGroup when pod gets added, podGroup: %v, pod: %v", klog.KObj(pg), klog.KObj(pod))
 	ctrl.pgAdded(pg)
 }
 
-// pgUpdated reacts to a PG update
+// podUpdated reacts to a PG update
 func (ctrl *PodGroupController) podUpdated(old, new interface{}) {
-
 	ctrl.podAdded(new)
 }
 
@@ -222,7 +219,7 @@ func (ctrl *PodGroupController) syncHandler(key string) error {
 
 	pgCopy := pg.DeepCopy()
 	// get all pods belong to the PogGroup from gangCache
-	podsInGangCache := ctrl.pgManager.GetAllPodsFromGang(util.GetId(pg.Namespace, pg.Name))
+	podsInGangCache := ctrl.pgManager.GetAllPodsFromGang(core.GetNamespacedName(pg))
 	// when update the pod's Status, gangCache has not changed,
 	// so we get the pods' status from the informer according to pods' keys in gangCache
 	// it may happen that when pod is created, we may get the onAdd event here before the gangCache,
@@ -300,7 +297,7 @@ func (ctrl *PodGroupController) patchPodGroup(old, new *schedv1alpha1.PodGroup) 
 		return nil
 	}
 
-	patch, err := util.CreateMergePatch(old, new)
+	patch, err := core.CreateMergePatch(old, new)
 	if err != nil {
 		return err
 	}

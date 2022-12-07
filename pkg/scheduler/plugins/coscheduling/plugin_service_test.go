@@ -73,34 +73,35 @@ func TestEndpointsQueryGangInfo(t *testing.T) {
 		},
 	}
 	_, err := suit.Handle.ClientSet().CoreV1().Pods("ganga_ns").Create(context.TODO(), podToCreateGangA, metav1.CreateOptions{})
-	if err != nil {
-		t.Errorf("retry podClient create pod err: %v", err)
-	}
+	assert.NoError(t, err)
 	p, err := suit.proxyNew(suit.gangSchedulingArgs, suit.Handle)
 	assert.NotNil(t, p)
 	assert.Nil(t, err)
 	suit.start()
-	gp := p.(*Coscheduling)
-	gangExpected := core.GangSummary{
-		Name:                     "ganga_ns/ganga",
-		WaitTime:                 time.Second * 600,
-		CreateTime:               podToCreateGangA.CreationTimestamp.Time,
-		Mode:                     extension.GangModeStrict,
-		MinRequiredNumber:        2,
-		TotalChildrenNum:         2,
-		Children:                 sets.NewString("ganga_ns/pod1"),
-		WaitingForBindChildren:   sets.NewString(),
-		BoundChildren:            sets.NewString(),
-		OnceResourceSatisfied:    false,
-		ScheduleCycleValid:       true,
-		ScheduleCycle:            1,
-		ChildrenScheduleRoundMap: map[string]int{},
-		GangFrom:                 core.GangFromPodAnnotation,
-		HasGangInit:              true,
+	cs := p.(*Coscheduling)
+	expectedGangSummary := core.GangSummary{
+		Name:              "ganga_ns/ganga",
+		CreationTimestamp: podToCreateGangA.CreationTimestamp.Time,
+		Spec: core.GangSpec{
+			WaitTime:    600 * time.Second,
+			Mode:        extension.GangModeStrict,
+			MinMember:   2,
+			TotalMember: 2,
+			Groups:      []string{"ganga_ns/ganga"},
+			GangFrom:    core.GangFromPodAnnotation,
+		},
+		SpecInitialized:    true,
+		Pods:               sets.NewString("ganga_ns/pod1"),
+		WaitingPods:        nil,
+		BoundPods:          nil,
+		ResourceSatisfied:  false,
+		ScheduleCycleValid: true,
+		ScheduleCycle:      1,
+		PodScheduleCycles:  nil,
 	}
 	{
 		engine := gin.Default()
-		gp.RegisterEndpoints(engine.Group("/"))
+		cs.RegisterEndpoints(engine.Group("/"))
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", "/gang/ganga_ns/ganga", nil)
 		engine.ServeHTTP(w, req)
@@ -108,11 +109,11 @@ func TestEndpointsQueryGangInfo(t *testing.T) {
 		gangMarshal := &core.GangSummary{}
 		err = json.NewDecoder(w.Result().Body).Decode(gangMarshal)
 		assert.NoError(t, err)
-		assert.Equal(t, &gangExpected, gangMarshal)
+		assert.Equal(t, &expectedGangSummary, gangMarshal)
 	}
 	{
 		engine := gin.Default()
-		gp.RegisterEndpoints(engine.Group("/"))
+		cs.RegisterEndpoints(engine.Group("/"))
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest("GET", "/gangs", nil)
 		engine.ServeHTTP(w, req)
@@ -120,6 +121,6 @@ func TestEndpointsQueryGangInfo(t *testing.T) {
 		gangMarshalMap := make(map[string]*core.GangSummary)
 		err = json.Unmarshal([]byte(w.Body.String()), &gangMarshalMap)
 		assert.NoError(t, err)
-		assert.Equal(t, &gangExpected, gangMarshalMap["ganga_ns/ganga"])
+		assert.Equal(t, &expectedGangSummary, gangMarshalMap["ganga_ns/ganga"])
 	}
 }
