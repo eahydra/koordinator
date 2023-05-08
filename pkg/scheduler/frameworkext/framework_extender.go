@@ -151,9 +151,9 @@ func (ext *frameworkExtenderImpl) RunPreFilterPlugins(ctx context.Context, cycle
 	}
 
 	for _, transformer := range ext.preFilterTransformers {
-		newPod, transformed, err := transformer.BeforePreFilter(ext, cycleState, pod)
+		newPod, transformed, err := transformer.BeforePreFilter(ctx, cycleState, pod)
 		if err != nil {
-			klog.ErrorS(err, "Failed to BeforePreFilter", "pod", klog.KObj(pod), "plugin", transformer.Name())
+			klog.ErrorS(err, "Failed to run PreFilterTransformer", "pod", klog.KObj(pod), "plugin", transformer.Name())
 			return framework.AsStatus(err)
 		}
 		if transformed {

@@ -124,7 +124,6 @@ var _ framework.StateData = &stateData{}
 type stateData struct {
 	matched       map[string][]*reservationInfo
 	unmatched     map[string][]*reservationInfo
-	unfits        map[string][]*reservationInfo
 	preferredNode string
 	assumed       *schedulingv1alpha1.Reservation
 }
@@ -196,6 +195,8 @@ func (pl *Plugin) Filter(ctx context.Context, cycleState *framework.CycleState, 
 	}
 
 	if !reservationutil.IsReservePod(pod) {
+		requests, _ := resourceapi.PodRequestsAndLimits(pod)
+		podResource := framework.NewResource(requests)
 		state := getStateData(cycleState)
 		rOnNode := state.matched[node.Name]
 		totalRestrictedReservations := 0
@@ -203,7 +204,7 @@ func (pl *Plugin) Filter(ctx context.Context, cycleState *framework.CycleState, 
 		for _, rInfo := range rOnNode {
 			if rInfo.reservation.Spec.AllocatePolicy == schedulingv1alpha1.ReservationAllocatePolicyRestricted {
 				totalRestrictedReservations++
-				if reservationutil.FitReservationResources(pod, rInfo.allocatable, rInfo.allocated) {
+				if reservationutil.FitReservationResources(podResource, rInfo.allocatable, rInfo.allocated) {
 					return nil
 				}
 				insufficientReservations++

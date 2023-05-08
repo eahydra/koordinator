@@ -276,11 +276,33 @@ func ReservePorts(r *schedulingv1alpha1.Reservation) framework.HostPortInfo {
 	return portInfo
 }
 
-func FitReservationResources(pod *corev1.Pod, allocatable, allocated corev1.ResourceList) bool {
+func FitReservationResources(podRequest *framework.Resource, allocatable, allocated corev1.ResourceList) bool {
 	remaining := quotav1.SubtractWithNonNegativeResult(allocatable, allocated)
-	podRequests, _ := resource.PodRequestsAndLimits(pod)
-	satisfied, _ := quotav1.LessThanOrEqual(podRequests, remaining)
-	return satisfied
+	remainingResource := framework.NewResource(remaining)
+
+	if podRequest.MilliCPU == 0 &&
+		podRequest.Memory == 0 &&
+		podRequest.EphemeralStorage == 0 &&
+		len(podRequest.ScalarResources) == 0 {
+		return true
+	}
+
+	if podRequest.MilliCPU > remainingResource.MilliCPU {
+		return false
+	}
+	if podRequest.Memory > remainingResource.Memory {
+		return false
+	}
+	if podRequest.EphemeralStorage > remainingResource.EphemeralStorage {
+		return false
+	}
+
+	for rName, rQuant := range podRequest.ScalarResources {
+		if rQuant > remainingResource.ScalarResources[rName] {
+			return false
+		}
+	}
+	return true
 }
 
 // MatchReservationOwners checks if the scheduling pod matches the reservation's owner spec.

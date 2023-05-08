@@ -51,7 +51,7 @@ type TestTransformer struct {
 
 func (h *TestTransformer) Name() string { return "TestTransformer" }
 
-func (h *TestTransformer) BeforePreFilter(handle ExtendedHandle, state *framework.CycleState, pod *corev1.Pod) (*corev1.Pod, bool, error) {
+func (h *TestTransformer) BeforePreFilter(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod) (*corev1.Pod, bool, error) {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
