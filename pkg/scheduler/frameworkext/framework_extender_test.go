@@ -415,7 +415,8 @@ func TestPreBind(t *testing.T) {
 }
 
 type fakeReservationPreFilterExtension struct {
-	reservation            *schedulingv1alpha1.Reservation
+	matched                []*ReservationInfo
+	unmatched              []*ReservationInfo
 	pods                   []*corev1.Pod
 	removeReservationErr   error
 	addPodInReservationErr error
@@ -423,8 +424,9 @@ type fakeReservationPreFilterExtension struct {
 
 func (f *fakeReservationPreFilterExtension) Name() string { return "fakeReservationPreFilterExtension" }
 
-func (f *fakeReservationPreFilterExtension) RemoveReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
-	f.reservation = reservation
+func (f *fakeReservationPreFilterExtension) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, matched []*ReservationInfo, unmatched []*ReservationInfo, nodeInfo *framework.NodeInfo) *framework.Status {
+	f.matched = matched
+	f.unmatched = unmatched
 	if f.removeReservationErr != nil {
 		return framework.AsStatus(f.removeReservationErr)
 	}
@@ -444,60 +446,25 @@ func TestReservationPreFilterExtension(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "fake-reservation",
 		},
+		Spec: schedulingv1alpha1.ReservationSpec{
+			Template: &corev1.PodTemplateSpec{},
+		},
 	}
 	tests := []struct {
 		name                   string
 		reservation            *schedulingv1alpha1.Reservation
-		pods                   []*corev1.Pod
 		removeReservationErr   error
 		addPodInReservationErr error
 		wantReservation        *schedulingv1alpha1.Reservation
-		wantPods               []*corev1.Pod
 		wantStatus1            bool
 		wantStatus2            bool
 	}{
 		{
-			name:        "remove reservation and pods",
-			reservation: reservation,
-			pods: []*corev1.Pod{
-				schedulertesting.MakePod().Name("test-pod-1").Obj(),
-				schedulertesting.MakePod().Name("test-pod-2").Obj(),
-			},
+			name:            "store reservation and pods",
+			reservation:     reservation,
 			wantReservation: reservation,
-			wantPods: []*corev1.Pod{
-				schedulertesting.MakePod().Name("test-pod-1").Obj(),
-				schedulertesting.MakePod().Name("test-pod-2").Obj(),
-			},
-			wantStatus1: true,
-			wantStatus2: true,
-		},
-		{
-			name:        "failed remove reservation",
-			reservation: reservation,
-			pods: []*corev1.Pod{
-				schedulertesting.MakePod().Name("test-pod-1").Obj(),
-				schedulertesting.MakePod().Name("test-pod-2").Obj(),
-			},
-			removeReservationErr: errors.New("failed"),
-			wantReservation:      reservation,
-			wantStatus1:          false,
-			wantStatus2:          false,
-		},
-		{
-			name:        "failed add pod in reservation",
-			reservation: reservation,
-			pods: []*corev1.Pod{
-				schedulertesting.MakePod().Name("test-pod-1").Obj(),
-				schedulertesting.MakePod().Name("test-pod-2").Obj(),
-			},
-			wantPods: []*corev1.Pod{
-				schedulertesting.MakePod().Name("test-pod-1").Obj(),
-				schedulertesting.MakePod().Name("test-pod-2").Obj(),
-			},
-			addPodInReservationErr: errors.New("failed"),
-			wantReservation:        reservation,
-			wantStatus1:            true,
-			wantStatus2:            false,
+			wantStatus1:     true,
+			wantStatus2:     true,
 		},
 	}
 	for _, tt := range tests {
@@ -524,16 +491,11 @@ func TestReservationPreFilterExtension(t *testing.T) {
 
 			cycleState := framework.NewCycleState()
 
-			status := extender.RunReservationPreFilterExtensionRemoveReservation(context.TODO(), cycleState, &corev1.Pod{}, tt.reservation, framework.NewNodeInfo())
+			rInfo := NewReservationInfo(tt.reservation)
+
+			status := extender.RunReservationPreFilterExtensionRestoreReservation(context.TODO(), cycleState, &corev1.Pod{}, []*ReservationInfo{rInfo}, nil, framework.NewNodeInfo())
 			assert.Equal(t, tt.wantStatus1, status.IsSuccess())
-			if status.IsSuccess() {
-				for _, pod := range tt.pods {
-					status := extender.RunReservationPreFilterExtensionAddPodInReservation(context.TODO(), cycleState, &corev1.Pod{}, framework.NewPodInfo(pod), tt.reservation, framework.NewNodeInfo())
-					assert.Equal(t, tt.wantStatus2, status.IsSuccess())
-				}
-			}
-			assert.Equal(t, tt.wantReservation, pl.reservation)
-			assert.Equal(t, tt.wantPods, pl.pods)
+			assert.Equal(t, tt.wantReservation, pl.matched[0].Reservation)
 		})
 	}
 }

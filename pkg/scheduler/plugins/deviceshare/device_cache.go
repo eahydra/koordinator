@@ -49,6 +49,23 @@ func (in deviceResources) DeepCopy() deviceResources {
 	return out
 }
 
+func (in deviceResources) add(r deviceResources) {
+	for minor, rl := range r {
+		in[minor] = quotav1.Add(in[minor], rl)
+	}
+}
+
+func (in deviceResources) sub(r deviceResources) {
+	for minor, rl := range r {
+		rl = quotav1.SubtractWithNonNegativeResult(in[minor], rl)
+		if quotav1.IsZero(rl) {
+			delete(in, minor)
+		} else {
+			in[minor] = rl
+		}
+	}
+}
+
 type deviceResourceMinorPair struct {
 	minor     int
 	resources corev1.ResourceList
@@ -73,7 +90,7 @@ type nodeDevice struct {
 	deviceTotal map[schedulingv1alpha1.DeviceType]deviceResources
 	deviceFree  map[schedulingv1alpha1.DeviceType]deviceResources
 	deviceUsed  map[schedulingv1alpha1.DeviceType]deviceResources
-	allocateSet map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList
+	allocateSet map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources
 }
 
 func newNodeDevice() *nodeDevice {
@@ -81,7 +98,7 @@ func newNodeDevice() *nodeDevice {
 		deviceTotal: make(map[schedulingv1alpha1.DeviceType]deviceResources),
 		deviceFree:  make(map[schedulingv1alpha1.DeviceType]deviceResources),
 		deviceUsed:  make(map[schedulingv1alpha1.DeviceType]deviceResources),
-		allocateSet: make(map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList),
+		allocateSet: make(map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources),
 	}
 }
 
@@ -143,13 +160,49 @@ func (n *nodeDevice) resetDeviceTotal(resources map[schedulingv1alpha1.DeviceTyp
 func (n *nodeDevice) updateCacheUsed(deviceAllocations apiext.DeviceAllocations, pod *corev1.Pod, add bool) {
 	if len(deviceAllocations) > 0 {
 		for deviceType, allocations := range deviceAllocations {
-			if !n.isValid(deviceType, pod, add) {
+			if !n.isValid(deviceType, pod.Namespace, pod.Name, add) {
 				continue
 			}
 			n.updateDeviceUsed(deviceType, allocations, add)
 			n.resetDeviceFree(deviceType)
 			n.updateAllocateSet(deviceType, allocations, pod, add)
 		}
+	}
+}
+
+func (n *nodeDevice) updateUsed(used map[schedulingv1alpha1.DeviceType]deviceResources, namespace string, name string, add bool) {
+	podNamespacedName := types.NamespacedName{Namespace: namespace, Name: name}
+	for deviceType, resources := range used {
+		if !n.isValid(deviceType, namespace, name, add) {
+			continue
+		}
+		d := n.deviceUsed[deviceType]
+		if d == nil {
+			d = deviceResources{}
+			n.deviceUsed[deviceType] = d
+		}
+		if add {
+			d.add(resources)
+			alloc := n.allocateSet[deviceType][podNamespacedName]
+			if alloc == nil {
+				alloc = deviceResources{}
+				n.allocateSet[deviceType][podNamespacedName] = alloc
+			}
+			alloc.add(resources)
+		} else {
+			d.sub(resources)
+			if len(d) == 0 {
+				delete(n.deviceUsed, deviceType)
+			}
+			alloc := n.allocateSet[deviceType][podNamespacedName]
+			if alloc != nil {
+				alloc.sub(resources)
+				if len(alloc) == 0 {
+					delete(n.allocateSet[deviceType], podNamespacedName)
+				}
+			}
+		}
+		n.resetDeviceFree(deviceType)
 	}
 }
 
@@ -171,6 +224,27 @@ func (n *nodeDevice) getUsed(namespace, name string) map[schedulingv1alpha1.Devi
 		allocations[deviceType] = resourcesCopy
 	}
 	return allocations
+}
+
+func (n *nodeDevice) clone() *nodeDevice {
+	ns := newNodeDevice()
+	for deviceType, total := range n.deviceTotal {
+		ns.deviceTotal[deviceType] = total.DeepCopy()
+	}
+	for deviceType, used := range n.deviceUsed {
+		ns.deviceUsed[deviceType] = used.DeepCopy()
+	}
+	for deviceType, free := range n.deviceFree {
+		ns.deviceFree[deviceType] = free.DeepCopy()
+	}
+	for deviceType, allocSet := range n.allocateSet {
+		s := make(map[types.NamespacedName]deviceResources)
+		for k, v := range allocSet {
+			s[k] = v.DeepCopy()
+		}
+		ns.allocateSet[deviceType] = s
+	}
+	return ns
 }
 
 func (n *nodeDevice) replaceWith(freeDevices map[schedulingv1alpha1.DeviceType]deviceResources) *nodeDevice {
@@ -254,14 +328,14 @@ func (n *nodeDevice) updateDeviceUsed(deviceType schedulingv1alpha1.DeviceType, 
 	}
 }
 
-func (n *nodeDevice) isValid(deviceType schedulingv1alpha1.DeviceType, pod *corev1.Pod, add bool) bool {
+func (n *nodeDevice) isValid(deviceType schedulingv1alpha1.DeviceType, namespace string, name string, add bool) bool {
 	allocateSet := n.allocateSet[deviceType]
 	if allocateSet == nil {
-		allocateSet = make(map[types.NamespacedName]map[int]corev1.ResourceList)
+		allocateSet = make(map[types.NamespacedName]deviceResources)
 	}
 	n.allocateSet[deviceType] = allocateSet
 
-	podNamespacedName := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+	podNamespacedName := types.NamespacedName{Namespace: namespace, Name: name}
 	if add {
 		if _, ok := allocateSet[podNamespacedName]; ok {
 			// for non-failover scenario, pod might already exist in cache after Reserve step.
@@ -283,13 +357,14 @@ func (n *nodeDevice) updateAllocateSet(deviceType schedulingv1alpha1.DeviceType,
 	}
 
 	if n.allocateSet[deviceType] == nil {
-		n.allocateSet[deviceType] = make(map[types.NamespacedName]map[int]corev1.ResourceList)
+		n.allocateSet[deviceType] = make(map[types.NamespacedName]deviceResources)
 	}
 	if add {
-		n.allocateSet[deviceType][podNamespacedName] = make(map[int]corev1.ResourceList)
+		resources := make(deviceResources)
 		for _, allocation := range allocations {
-			n.allocateSet[deviceType][podNamespacedName][int(allocation.Minor)] = allocation.Resources.DeepCopy()
+			resources[int(allocation.Minor)] = allocation.Resources.DeepCopy()
 		}
+		n.allocateSet[deviceType][podNamespacedName] = resources
 	} else {
 		delete(n.allocateSet[deviceType], podNamespacedName)
 	}

@@ -414,7 +414,7 @@ func Test_Plugin_ReservationPreFilterExtension(t *testing.T) {
 		},
 	})
 
-	status = pl.RemoveReservation(context.TODO(), cycleState, pod, reservation, nodeInfo)
+	status = pl.RestoreReservation(context.TODO(), cycleState, pod, nil, nil, nodeInfo)
 	assert.True(t, status.IsSuccess())
 
 	expectReserved := map[string]map[types.UID]map[schedulingv1alpha1.DeviceType]deviceResources{
@@ -480,10 +480,11 @@ func Test_Plugin_PreFilter(t *testing.T) {
 			name: "skip non device pod",
 			pod:  &corev1.Pod{},
 			wantState: &preFilterState{
-				skip:               true,
-				podRequests:        make(corev1.ResourceList),
-				preemptibleDevices: map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
-				reservedDevices:    map[string]map[types.UID]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				skip:                  true,
+				podRequests:           make(corev1.ResourceList),
+				preemptibleDevices:    map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				matchedReservations:   map[string][]*frameworkext.ReservationInfo{},
+				unmatchedReservations: map[string][]reservationAlloc{},
 			},
 		},
 		{
@@ -562,8 +563,9 @@ func Test_Plugin_PreFilter(t *testing.T) {
 					apiext.ResourceGPUCore:        resource.MustParse("100"),
 					apiext.ResourceGPUMemoryRatio: resource.MustParse("100"),
 				},
-				preemptibleDevices: map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
-				reservedDevices:    map[string]map[types.UID]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				preemptibleDevices:    map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				matchedReservations:   map[string][]*frameworkext.ReservationInfo{},
+				unmatchedReservations: map[string][]reservationAlloc{},
 			},
 		},
 		{
@@ -593,8 +595,9 @@ func Test_Plugin_PreFilter(t *testing.T) {
 				podRequests: corev1.ResourceList{
 					apiext.ResourceFPGA: resource.MustParse("100"),
 				},
-				preemptibleDevices: map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
-				reservedDevices:    map[string]map[types.UID]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				preemptibleDevices:    map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				matchedReservations:   map[string][]*frameworkext.ReservationInfo{},
+				unmatchedReservations: map[string][]reservationAlloc{},
 			},
 		},
 		{
@@ -627,8 +630,9 @@ func Test_Plugin_PreFilter(t *testing.T) {
 					apiext.ResourceGPUMemoryRatio: resource.MustParse("100"),
 					apiext.ResourceRDMA:           resource.MustParse("100"),
 				},
-				preemptibleDevices: map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
-				reservedDevices:    map[string]map[types.UID]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				preemptibleDevices:    map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
+				matchedReservations:   map[string][]*frameworkext.ReservationInfo{},
+				unmatchedReservations: map[string][]reservationAlloc{},
 			},
 		},
 	}
@@ -1350,7 +1354,7 @@ func Test_Plugin_FilterReservation(t *testing.T) {
 		},
 	})
 
-	status = pl.RemoveReservation(context.TODO(), cycleState, pod, reservation, nodeInfo)
+	status = pl.RestoreReservation(context.TODO(), cycleState, pod, nil, nil, nodeInfo)
 	assert.True(t, status.IsSuccess())
 
 	status = pl.FilterReservation(context.TODO(), cycleState, pod, reservation, "test-node-1")
@@ -1691,7 +1695,7 @@ func Test_Plugin_Reserve(t *testing.T) {
 								},
 							},
 							deviceUsed:  map[schedulingv1alpha1.DeviceType]deviceResources{},
-							allocateSet: make(map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList),
+							allocateSet: make(map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources),
 						},
 					},
 				},
@@ -2064,7 +2068,7 @@ func Test_Plugin_Reserve(t *testing.T) {
 									},
 								},
 							},
-							allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList{},
+							allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources{},
 						},
 					},
 				},
@@ -2138,7 +2142,7 @@ func Test_Plugin_Reserve(t *testing.T) {
 									},
 								},
 							},
-							allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList{},
+							allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources{},
 						},
 					},
 				},
@@ -2414,7 +2418,7 @@ func Test_Plugin_Unreserve(t *testing.T) {
 									},
 								},
 							},
-							allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList{
+							allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources{
 								schedulingv1alpha1.GPU: {
 									namespacedName: {
 										0: corev1.ResourceList{
@@ -2520,7 +2524,7 @@ func Test_Plugin_Unreserve(t *testing.T) {
 							},
 						},
 						deviceUsed: map[schedulingv1alpha1.DeviceType]deviceResources{},
-						allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]map[int]corev1.ResourceList{
+						allocateSet: map[schedulingv1alpha1.DeviceType]map[types.NamespacedName]deviceResources{
 							schedulingv1alpha1.GPU:  {},
 							schedulingv1alpha1.FPGA: {},
 							schedulingv1alpha1.RDMA: {},

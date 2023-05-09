@@ -1266,6 +1266,9 @@ func TestReservationPreFilterExtension(t *testing.T) {
 			Name: "test-reservation",
 			UID:  uuid.NewUUID(),
 		},
+		Spec: schedulingv1alpha1.ReservationSpec{
+			Template: &corev1.PodTemplateSpec{},
+		},
 		Status: schedulingv1alpha1.ReservationStatus{
 			NodeName: "test-node",
 		},
@@ -1307,15 +1310,14 @@ func TestReservationPreFilterExtension(t *testing.T) {
 	nodeInfo := framework.NewNodeInfo()
 	nodeInfo.SetNode(node)
 
-	status := pl.RemoveReservation(context.TODO(), cycleState, &corev1.Pod{}, reservation, nodeInfo)
-	assert.True(t, status.IsSuccess())
-	assert.Equal(t, cpuset.NewCPUSet(6, 7, 8, 9), state.reservedCPUs["test-node"][reservation.UID])
+	rInfo := frameworkext.NewReservationInfo(reservation)
+	rInfo.AddPod(podA)
 
-	status = pl.AddPodInReservation(context.TODO(), cycleState, &corev1.Pod{}, framework.NewPodInfo(podA), reservation, nodeInfo)
-	assert.True(t, status.IsSuccess())
+	status := pl.RestoreReservation(context.TODO(), cycleState, &corev1.Pod{}, []*frameworkext.ReservationInfo{rInfo}, nil, nodeInfo)
 	assert.Equal(t, cpuset.NewCPUSet(8, 9), state.reservedCPUs["test-node"][reservation.UID])
 
-	status = pl.AddPodInReservation(context.TODO(), cycleState, &corev1.Pod{}, framework.NewPodInfo(podB), reservation, nodeInfo)
+	rInfo.AddPod(podB)
+	status = pl.RestoreReservation(context.TODO(), cycleState, &corev1.Pod{}, []*frameworkext.ReservationInfo{rInfo}, nil, nodeInfo)
 	assert.True(t, status.IsSuccess())
 	assert.True(t, state.reservedCPUs["test-node"][reservation.UID].IsEmpty())
 	assert.Empty(t, state.reservedCPUs)

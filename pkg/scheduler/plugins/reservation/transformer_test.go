@@ -17,9 +17,9 @@ limitations under the License.
 package reservation
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -27,13 +27,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/client-go/informers"
-	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/utils/pointer"
 
 	apiext "github.com/koordinator-sh/koordinator/apis/extension"
 	schedulingv1alpha1 "github.com/koordinator-sh/koordinator/apis/scheduling/v1alpha1"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/frameworkext"
 	reservationutil "github.com/koordinator-sh/koordinator/pkg/util/reservation"
 )
 
@@ -135,16 +134,11 @@ func TestBeforePreFilter(t *testing.T) {
 	})
 
 	cycleState := framework.NewCycleState()
-	pl.BeforePreFilter(nil, cycleState, pod)
+	pl.BeforePreFilter(context.TODO(), cycleState, pod)
 	expectState := &stateData{
-		matched: map[string][]*reservationInfo{
+		matched: map[string][]*frameworkext.ReservationInfo{
 			"test-node": {
 				pl.reservationCache.getReservationInfoByUID(matchedReservation.UID),
-			},
-		},
-		unmatched: map[string][]*reservationInfo{
-			"test-node": {
-				pl.reservationCache.getReservationInfoByUID(unmatchedReservation.UID),
 			},
 		},
 	}
@@ -366,21 +360,18 @@ func TestAfterPreFilter(t *testing.T) {
 	pl.reservationCache.updateReservation(matchedReservation)
 
 	unmatchedRInfo := pl.reservationCache.getReservationInfoByUID(unmatchedReservation.UID)
-	unmatchedRInfo.allocated = corev1.ResourceList{
+	unmatchedRInfo.Allocated = corev1.ResourceList{
 		corev1.ResourceCPU:    resource.MustParse("4"),
 		corev1.ResourceMemory: resource.MustParse("8Gi"),
 	}
-	unmatchedRInfo.pods[uuid.NewUUID()] = &podRequirement{}
+	unmatchedRInfo.Pods[uuid.NewUUID()] = &frameworkext.PodRequirement{}
 
 	matchRInfo := pl.reservationCache.getReservationInfoByUID(matchedReservation.UID)
 
 	cycleState := framework.NewCycleState()
 	cycleState.Write(stateKey, &stateData{
-		matched: map[string][]*reservationInfo{
+		matched: map[string][]*frameworkext.ReservationInfo{
 			node.Name: {matchRInfo},
-		},
-		unmatched: map[string][]*reservationInfo{
-			node.Name: {unmatchedRInfo},
 		},
 	})
 
@@ -408,100 +399,6 @@ func TestAfterPreFilter(t *testing.T) {
 	assert.Equal(t, expectNodeInfo.Requested, nodeInfo.Requested)
 	assert.Equal(t, expectNodeInfo.UsedPorts, nodeInfo.UsedPorts)
 	assert.True(t, equality.Semantic.DeepEqual(expectNodeInfo, nodeInfo))
-}
-
-func Test_restorePVCRefCounts(t *testing.T) {
-	normalPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "test-pod-1",
-		},
-		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{
-				{
-					VolumeSource: corev1.VolumeSource{
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: "claim-with-rwop",
-						},
-					},
-				},
-			},
-		},
-	}
-	readWriteOncePodPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "claim-with-rwop",
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOncePod},
-		},
-	}
-
-	testNodeName := "test-node-0"
-	testNode := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: testNodeName,
-		},
-	}
-	testNodeInfo := framework.NewNodeInfo()
-	testNodeInfo.SetNode(testNode)
-	testNodeInfo.AddPod(normalPod)
-	testNodeInfo.PodsWithRequiredAntiAffinity = []*framework.PodInfo{
-		framework.NewPodInfo(normalPod),
-	}
-	assert.Equal(t, 1, testNodeInfo.PVCRefCounts["default/claim-with-rwop"])
-
-	reservation := &schedulingv1alpha1.Reservation{
-		ObjectMeta: metav1.ObjectMeta{
-			UID:  uuid.NewUUID(),
-			Name: "reserve-pod-1",
-		},
-		Spec: schedulingv1alpha1.ReservationSpec{
-			Template: &corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "reserve-pod-1",
-				},
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "claim-with-rwop",
-								},
-							},
-						},
-					},
-				},
-			},
-			Owners: []schedulingv1alpha1.ReservationOwner{
-				{
-					Object: &corev1.ObjectReference{
-						Name: "test-pod-1",
-					},
-				},
-			},
-			TTL: &metav1.Duration{Duration: 30 * time.Minute},
-		},
-		Status: schedulingv1alpha1.ReservationStatus{
-			Phase:    schedulingv1alpha1.ReservationAvailable,
-			NodeName: testNodeName,
-		},
-	}
-
-	cs := kubefake.NewSimpleClientset(readWriteOncePodPVC)
-	informerFactory := informers.NewSharedInformerFactory(cs, 0)
-	_ = informerFactory.Core().V1().PersistentVolumeClaims().Lister()
-
-	informerFactory.Start(nil)
-	informerFactory.WaitForCacheSync(nil)
-
-	cache := newReservationCache(nil)
-	cache.updateReservation(reservation)
-	rInfo := cache.getReservationInfoByUID(reservation.UID)
-
-	restorePVCRefCounts(informerFactory, testNodeInfo, normalPod, []*reservationInfo{rInfo})
-	assert.Zero(t, testNodeInfo.PVCRefCounts["default/claim-with-rwop"])
 }
 
 func Test_matchReservation(t *testing.T) {

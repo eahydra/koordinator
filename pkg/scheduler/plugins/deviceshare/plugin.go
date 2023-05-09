@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	quotav1 "k8s.io/apiserver/pkg/quota/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/api/v1/resource"
@@ -69,19 +68,26 @@ type Plugin struct {
 }
 
 type preFilterState struct {
-	skip                bool
-	allocationResult    apiext.DeviceAllocations
-	podRequests         corev1.ResourceList
-	preemptibleDevices  map[string]map[schedulingv1alpha1.DeviceType]deviceResources
-	matchedReservations map[string][]*schedulingv1alpha1.Reservation
+	skip                  bool
+	allocationResult      apiext.DeviceAllocations
+	podRequests           corev1.ResourceList
+	preemptibleDevices    map[string]map[schedulingv1alpha1.DeviceType]deviceResources
+	matchedReservations   map[string][]*frameworkext.ReservationInfo
+	unmatchedReservations map[string][]reservationAlloc
+}
+
+type reservationAlloc struct {
+	rInfo    *frameworkext.ReservationInfo
+	remained map[schedulingv1alpha1.DeviceType]deviceResources
 }
 
 func (s *preFilterState) Clone() framework.StateData {
 	ns := &preFilterState{
-		skip:                s.skip,
-		allocationResult:    s.allocationResult,
-		podRequests:         s.podRequests,
-		matchedReservations: s.matchedReservations,
+		skip:                  s.skip,
+		allocationResult:      s.allocationResult,
+		podRequests:           s.podRequests,
+		matchedReservations:   s.matchedReservations,
+		unmatchedReservations: s.unmatchedReservations,
 	}
 
 	preemptibleDevices := map[string]map[schedulingv1alpha1.DeviceType]deviceResources{}
@@ -114,10 +120,11 @@ func getPreFilterState(cycleState *framework.CycleState) (*preFilterState, *fram
 
 func (p *Plugin) PreFilter(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod) *framework.Status {
 	state := &preFilterState{
-		skip:                true,
-		podRequests:         make(corev1.ResourceList),
-		preemptibleDevices:  map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
-		matchedReservations: map[string][]*schedulingv1alpha1.Reservation{},
+		skip:                  true,
+		podRequests:           make(corev1.ResourceList),
+		preemptibleDevices:    map[string]map[schedulingv1alpha1.DeviceType]deviceResources{},
+		matchedReservations:   map[string][]*frameworkext.ReservationInfo{},
+		unmatchedReservations: map[string][]reservationAlloc{},
 	}
 
 	podRequests, _ := resource.PodRequestsAndLimits(pod)
@@ -227,11 +234,7 @@ func (p *Plugin) RemovePod(ctx context.Context, cycleState *framework.CycleState
 	return nil
 }
 
-func (p *Plugin) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo, assignedPods map[types.UID]*framework.PodInfo) (interface{}, *framework.Status) {
-	return nil, nil
-}
-
-func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
+func (p *Plugin) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, matched []*frameworkext.ReservationInfo, unmatched []*frameworkext.ReservationInfo, nodeInfo *framework.NodeInfo) *framework.Status {
 	state, status := getPreFilterState(cycleState)
 	if !status.IsSuccess() {
 		return status
@@ -240,7 +243,8 @@ func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.Cy
 		return nil
 	}
 
-	nd := p.nodeDeviceCache.getNodeDevice(reservation.Status.NodeName, false)
+	nodeName := nodeInfo.Node().Name
+	nd := p.nodeDeviceCache.getNodeDevice(nodeName, false)
 	if nd == nil {
 		return nil
 	}
@@ -248,48 +252,60 @@ func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.Cy
 	nd.lock.RLock()
 	defer nd.lock.RUnlock()
 
-	namespacedName := reservationutil.GetReservationNamespacedName(reservation)
-	reservationAllocated := nd.getUsed(namespacedName.Namespace, namespacedName.Name)
-	if len(reservationAllocated) == 0 {
-		return nil
+	var filteredMatched []*frameworkext.ReservationInfo
+	var filteredUnmatched []reservationAlloc
+	for _, rInfo := range matched {
+		namespacedName := reservationutil.GetReservationNamespacedName(rInfo.Reservation)
+		allocated := nd.getUsed(namespacedName.Namespace, namespacedName.Name)
+		if len(allocated) == 0 {
+			continue
+		}
+		filteredMatched = append(filteredMatched, rInfo)
 	}
-
-	klog.V(5).Infof("DeviceShare.RemoveReservation: podToSchedule %v, remove reservation %v on node %s, reservationAllocated: %v",
-		klog.KObj(podToSchedule), klog.KObj(reservation), nodeInfo.Node().Name, reservationAllocated)
-
-	state.matchedReservations[reservation.Status.NodeName] = append(state.matchedReservations[reservation.Status.NodeName], reservation)
+	for _, rInfo := range unmatched {
+		namespacedName := reservationutil.GetReservationNamespacedName(rInfo.Reservation)
+		allocated := nd.getUsed(namespacedName.Namespace, namespacedName.Name)
+		if len(allocated) == 0 {
+			continue
+		}
+		for _, podRequirement := range rInfo.Pods {
+			podAllocated := nd.getUsed(podRequirement.Namespace, podRequirement.Name)
+			if len(podAllocated) == 0 {
+				continue
+			}
+			allocated = subtractAllocated(allocated, podAllocated, true)
+		}
+		filteredUnmatched = append(filteredUnmatched, reservationAlloc{
+			rInfo:    rInfo,
+			remained: allocated,
+		})
+	}
+	if len(filteredMatched) > 0 {
+		state.matchedReservations[nodeName] = filteredMatched
+	}
+	if len(filteredUnmatched) > 0 {
+		state.unmatchedReservations[nodeName] = filteredUnmatched
+	}
 	return nil
 }
 
-func (p *Plugin) AddPodInReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, podInfoToAdd *framework.PodInfo, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
-	if reservationutil.IsReservePod(podInfoToAdd.Pod) {
-		return nil
+func (p *Plugin) restoreUnmatchedReservations(nodeName string, nodeDeviceInfo *nodeDevice, state *preFilterState) *nodeDevice {
+	unmatched := state.unmatchedReservations[nodeName]
+	if len(unmatched) > 0 {
+		nodeDeviceInfo = nodeDeviceInfo.clone()
+		for _, alloc := range unmatched {
+			namespacedName := reservationutil.GetReservationNamespacedName(alloc.rInfo.Reservation)
+			used := nodeDeviceInfo.getUsed(namespacedName.Namespace, namespacedName.Name)
+			if len(used) == 0 {
+				continue
+			}
+			nodeDeviceInfo.updateUsed(used, namespacedName.Namespace, namespacedName.Name, false)
+			if len(alloc.remained) > 0 {
+				nodeDeviceInfo.updateUsed(alloc.remained, namespacedName.Namespace, namespacedName.Name, true)
+			}
+		}
 	}
-
-	state, status := getPreFilterState(cycleState)
-	if !status.IsSuccess() {
-		return status
-	}
-	if state.skip {
-		return nil
-	}
-
-	nd := p.nodeDeviceCache.getNodeDevice(podInfoToAdd.Pod.Spec.NodeName, false)
-	if nd == nil {
-		return nil
-	}
-
-	nd.lock.RLock()
-	defer nd.lock.RUnlock()
-
-	podAllocated := nd.getUsed(podInfoToAdd.Pod.Namespace, podInfoToAdd.Pod.Name)
-	if len(podAllocated) == 0 {
-		return nil
-	}
-
-	klog.V(5).Infof("DeviceShare.AddPodInReservation: podToSchedule %v, add podInfoToAdd %v in reservation %v on node %s, allocatedDevices: %v",
-		klog.KObj(podToSchedule), klog.KObj(podInfoToAdd.Pod), klog.KObj(reservation), nodeInfo.Node().Name, podAllocated)
-	return nil
+	return nodeDeviceInfo
 }
 
 func (p *Plugin) Filter(ctx context.Context, cycleState *framework.CycleState, pod *corev1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
@@ -311,21 +327,25 @@ func (p *Plugin) Filter(ctx context.Context, cycleState *framework.CycleState, p
 		return framework.NewStatus(framework.UnschedulableAndUnresolvable, ErrMissingDevice)
 	}
 
-	nodeDeviceInfo.lock.RLock()
-	defer nodeDeviceInfo.lock.RUnlock()
+	originalNodeDeviceInfo := nodeDeviceInfo
+
+	originalNodeDeviceInfo.lock.RLock()
+	defer originalNodeDeviceInfo.lock.RUnlock()
+
+	nodeDeviceInfo = p.restoreUnmatchedReservations(node.Name, originalNodeDeviceInfo, state)
 
 	if matchedReservations := state.matchedReservations[node.Name]; len(matchedReservations) > 0 {
-		for _, reservation := range matchedReservations {
-			namespacedName := reservationutil.GetReservationNamespacedName(reservation)
+		for _, rInfo := range matchedReservations {
+			namespacedName := reservationutil.GetReservationNamespacedName(rInfo.Reservation)
 			preemptibleDevices := nodeDeviceInfo.getUsed(namespacedName.Namespace, namespacedName.Name)
 			preemptibleDevices = appendAllocatedDevices(preemptibleDevices, state.preemptibleDevices[node.Name])
-			allocateResult, err := p.allocator.Allocate(nodeInfo.Node().Name, pod, state.podRequests, nodeDeviceInfo, preemptibleDevices)
+			allocateResult, err := p.allocator.Allocate(node.Name, pod, state.podRequests, nodeDeviceInfo, preemptibleDevices)
 			if len(allocateResult) > 0 && err == nil {
 				return nil
 			}
 		}
 	}
-	allocateResult, err := p.allocator.Allocate(nodeInfo.Node().Name, pod, state.podRequests, nodeDeviceInfo, state.preemptibleDevices[node.Name])
+	allocateResult, err := p.allocator.Allocate(node.Name, pod, state.podRequests, nodeDeviceInfo, state.preemptibleDevices[node.Name])
 	if len(allocateResult) != 0 && err == nil {
 		return nil
 	}
@@ -346,19 +366,19 @@ func (p *Plugin) FilterReservation(ctx context.Context, cycleState *framework.Cy
 		return framework.NewStatus(framework.UnschedulableAndUnresolvable, ErrMissingDevice)
 	}
 
-	nodeDeviceInfo.lock.RLock()
-	defer nodeDeviceInfo.lock.RUnlock()
+	originalNodeDeviceInfo := nodeDeviceInfo
 
-	if matchedReservations := state.matchedReservations[nodeName]; len(matchedReservations) > 0 {
-		for _, reservation := range matchedReservations {
-			namespacedName := reservationutil.GetReservationNamespacedName(reservation)
-			preemptibleDevices := nodeDeviceInfo.getUsed(namespacedName.Namespace, namespacedName.Name)
-			preemptibleDevices = appendAllocatedDevices(preemptibleDevices, state.preemptibleDevices[nodeName])
-			allocateResult, err := p.allocator.Allocate(nodeName, pod, state.podRequests, nodeDeviceInfo, preemptibleDevices)
-			if len(allocateResult) == 0 || err != nil {
-				return framework.NewStatus(framework.Unschedulable, ErrInsufficientDevices)
-			}
-		}
+	originalNodeDeviceInfo.lock.RLock()
+	defer originalNodeDeviceInfo.lock.RUnlock()
+
+	nodeDeviceInfo = p.restoreUnmatchedReservations(nodeName, originalNodeDeviceInfo, state)
+
+	namespacedName := reservationutil.GetReservationNamespacedName(reservation)
+	preemptibleDevices := nodeDeviceInfo.getUsed(namespacedName.Namespace, namespacedName.Name)
+	preemptibleDevices = appendAllocatedDevices(preemptibleDevices, state.preemptibleDevices[nodeName])
+	allocateResult, err := p.allocator.Allocate(nodeName, pod, state.podRequests, nodeDeviceInfo, preemptibleDevices)
+	if len(allocateResult) == 0 || err != nil {
+		return framework.NewStatus(framework.Unschedulable, ErrInsufficientDevices)
 	}
 	return nil
 }
@@ -377,17 +397,32 @@ func (p *Plugin) Reserve(ctx context.Context, cycleState *framework.CycleState, 
 		return framework.NewStatus(framework.UnschedulableAndUnresolvable, ErrMissingDevice)
 	}
 
-	nodeDeviceInfo.lock.Lock()
-	defer nodeDeviceInfo.lock.Unlock()
+	originalNodeDeviceInfo := nodeDeviceInfo
 
-	reservationReservedDevices := p.getReservationReservedDevices(cycleState, state, pod, nodeDeviceInfo, nodeName)
-	reservationReservedDevices = appendAllocatedDevices(reservationReservedDevices, state.preemptibleDevices[nodeName])
+	originalNodeDeviceInfo.lock.Lock()
+	defer originalNodeDeviceInfo.lock.Unlock()
 
-	allocateResult, err := p.allocator.Allocate(nodeName, pod, state.podRequests, nodeDeviceInfo, reservationReservedDevices)
+	nodeDeviceInfo = p.restoreUnmatchedReservations(nodeName, originalNodeDeviceInfo, state)
+
+	reservedDevices := p.getReservationReservedDevices(cycleState, state, pod, nodeDeviceInfo, nodeName)
+	if len(reservedDevices) > 0 {
+		reservedDevices = appendAllocatedDevices(reservedDevices, state.preemptibleDevices[nodeName])
+	} else {
+		if matchedReservations := state.matchedReservations[nodeName]; len(matchedReservations) > 0 {
+			for _, rInfo := range matchedReservations {
+				namespacedName := reservationutil.GetReservationNamespacedName(rInfo.Reservation)
+				reserved := nodeDeviceInfo.getUsed(namespacedName.Namespace, namespacedName.Name)
+				reservedDevices = appendAllocatedDevices(reservedDevices, reserved)
+			}
+		}
+		reservedDevices = appendAllocatedDevices(reservedDevices, state.preemptibleDevices[nodeName])
+	}
+	allocateResult, err := p.allocator.Allocate(nodeName, pod, state.podRequests, nodeDeviceInfo, reservedDevices)
 	if err != nil || len(allocateResult) == 0 {
 		return framework.NewStatus(framework.Unschedulable, ErrInsufficientDevices)
 	}
-	p.allocator.Reserve(pod, nodeDeviceInfo, allocateResult)
+
+	p.allocator.Reserve(pod, originalNodeDeviceInfo, allocateResult)
 	state.allocationResult = allocateResult
 	return nil
 }

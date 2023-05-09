@@ -258,11 +258,7 @@ func (p *Plugin) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
 }
 
-func (p *Plugin) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo, assignedPods map[types.UID]*framework.PodInfo) (interface{}, *framework.Status) {
-	return nil, nil
-}
-
-func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
+func (p *Plugin) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, matched []*frameworkext.ReservationInfo, unmatched []*frameworkext.ReservationInfo, nodeInfo *framework.NodeInfo) *framework.Status {
 	state, status := getPreFilterState(cycleState)
 	if !status.IsSuccess() {
 		return status
@@ -271,51 +267,37 @@ func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.Cy
 		return nil
 	}
 
-	allocatedCPUs, ok := p.cpuManager.GetAllocatedCPUSet(reservation.Status.NodeName, reservation.UID)
-	if !ok || allocatedCPUs.IsEmpty() {
-		return nil
-	}
-
-	klog.V(5).Infof("NodeNUMAResource.RemoveReservation: podToSchedule %v, reservation: %v on node %s, allocatedCPUs: %v",
-		klog.KObj(podToSchedule), klog.KObj(reservation), nodeInfo.Node().Name, allocatedCPUs)
-
-	reservedCPUsOnNode := state.reservedCPUs[reservation.Status.NodeName]
+	nodeName := nodeInfo.Node().Name
+	reservedCPUsOnNode := state.reservedCPUs[nodeName]
 	if reservedCPUsOnNode == nil {
 		reservedCPUsOnNode = map[types.UID]cpuset.CPUSet{}
-		state.reservedCPUs[reservation.Status.NodeName] = reservedCPUsOnNode
 	}
-	reservedCPUsOnNode[reservation.UID] = allocatedCPUs
-	return nil
-}
-
-func (p *Plugin) AddPodInReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, podInfoToAdd *framework.PodInfo, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
-	state, status := getPreFilterState(cycleState)
-	if !status.IsSuccess() {
-		return status
-	}
-	if state.skip {
-		return nil
-	}
-
-	allocatedCPUs, ok := p.cpuManager.GetAllocatedCPUSet(podInfoToAdd.Pod.Spec.NodeName, podInfoToAdd.Pod.UID)
-	if !ok || allocatedCPUs.IsEmpty() {
-		return nil
-	}
-	klog.V(5).Infof("NodeNUMAResource.AddPodInReservation: podToSchedule %v, add podInfoToAdd %v reservation %v on node %s, allocatedCPUs: %v",
-		klog.KObj(podToSchedule), klog.KObj(podInfoToAdd.Pod), klog.KObj(reservation), nodeInfo.Node().Name, allocatedCPUs)
-
-	reservedCPUsOnNode := state.reservedCPUs[reservation.Status.NodeName]
-	if reservedCPUsOnNode != nil {
-		cpus := reservedCPUsOnNode[reservation.UID]
-		cpus = cpus.Difference(allocatedCPUs)
-		if !cpus.IsEmpty() {
-			reservedCPUsOnNode[reservation.UID] = cpus
-		} else {
-			delete(reservedCPUsOnNode, reservation.UID)
-			if len(reservedCPUsOnNode) == 0 {
-				delete(state.reservedCPUs, reservation.Status.NodeName)
-			}
+	for _, rInfo := range matched {
+		allocatedCPUs, ok := p.cpuManager.GetAllocatedCPUSet(nodeName, rInfo.Reservation.UID)
+		if !ok || allocatedCPUs.IsEmpty() {
+			continue
 		}
+
+		for _, pod := range rInfo.Pods {
+			podCPUs, ok := p.cpuManager.GetAllocatedCPUSet(nodeName, pod.UID)
+			if !ok || podCPUs.IsEmpty() {
+				continue
+			}
+
+			allocatedCPUs = allocatedCPUs.Difference(podCPUs)
+		}
+
+		if !allocatedCPUs.IsEmpty() {
+			reservedCPUsOnNode[rInfo.Reservation.UID] = allocatedCPUs
+		} else {
+			delete(reservedCPUsOnNode, rInfo.Reservation.UID)
+		}
+	}
+
+	if len(reservedCPUsOnNode) > 0 {
+		state.reservedCPUs[nodeName] = reservedCPUsOnNode
+	} else {
+		delete(state.reservedCPUs, nodeName)
 	}
 
 	return nil
