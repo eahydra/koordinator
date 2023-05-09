@@ -308,7 +308,7 @@ func (ext *frameworkExtenderImpl) RunReservationFilterPlugins(ctx context.Contex
 	for _, pl := range ext.reservationFilterPlugins {
 		status := pl.FilterReservation(ctx, cycleState, pod, reservation, nodeName)
 		if !status.IsSuccess() {
-			klog.Infof("Failed to FilterReservation for Pod %q with Reservation %q on Node %q, failedPlugin: %s, reason: %s", klog.KObj(pod), klog.KObj(reservation), nodeName, status.FailedPlugin(), status.Message())
+			klog.Infof("Failed to FilterReservation for Pod %q with Reservation %q on Node %q, failedPlugin: %s, reason: %s", klog.KObj(pod), klog.KObj(reservation), nodeName, pl.Name(), status.Message())
 			return status
 		}
 	}

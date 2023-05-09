@@ -116,46 +116,12 @@ func (pl *Plugin) prepareMatchReservationState(ctx context.Context, cycleState *
 					return
 				}
 
-				if extender, ok := pl.handle.(frameworkext.FrameworkExtender); ok {
-					assignedPods := map[types.UID]*framework.PodInfo{}
-					for _, assignedPod := range rInfo.pods {
-						if pi, ok := podInfoMap[assignedPod.uid]; ok {
-							assignedPods[assignedPod.uid] = pi
-						}
-					}
-					vals, status := extender.RunReservationPreFilterExtensionRestoreReservations(ctx, cycleState, pod, rInfo.reservation, nodeInfo, assignedPods)
-					if !status.IsSuccess() {
-						errCh.SendErrorWithCancel(status.AsError(), cancel)
-						return
-					}
-					for k, v := range vals {
-						matchState.restoredMatched[k] = append(matchState.restoredMatched[k], v)
-					}
-				}
-
 				matchState.matched = append(matchState.matched, rInfo)
 
 			} else if len(rInfo.pods) > 0 {
 				if err = restoreUnmatchedReservations(nodeInfo, rInfo); err != nil {
 					errCh.SendErrorWithCancel(err, cancel)
 					return
-				}
-
-				if extender, ok := pl.handle.(frameworkext.FrameworkExtender); ok {
-					assignedPods := map[types.UID]*framework.PodInfo{}
-					for _, assignedPod := range rInfo.pods {
-						if pi, ok := podInfoMap[assignedPod.uid]; ok {
-							assignedPods[assignedPod.uid] = pi
-						}
-					}
-					vals, status := extender.RunReservationPreFilterExtensionRestoreReservations(ctx, cycleState, pod, rInfo.reservation, nodeInfo, assignedPods)
-					if !status.IsSuccess() {
-						errCh.SendErrorWithCancel(status.AsError(), cancel)
-						return
-					}
-					for k, v := range vals {
-						matchState.restoredUnmatched[k] = append(matchState.restoredUnmatched[k], v)
-					}
 				}
 
 				matchState.unmatched = append(matchState.unmatched, rInfo)

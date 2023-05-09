@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	quotav1 "k8s.io/apiserver/pkg/quota/v1"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/klog/v2"
@@ -115,6 +116,17 @@ func ValidateReservation(r *schedulingv1alpha1.Reservation) error {
 
 func IsReservePod(pod *corev1.Pod) bool {
 	return pod != nil && pod.Annotations != nil && pod.Annotations[AnnotationReservePod] == "true"
+}
+
+func GetReservationNamespacedName(r *schedulingv1alpha1.Reservation) types.NamespacedName {
+	namespacedName := types.NamespacedName{
+		Name:      GetReservationKey(r),
+		Namespace: corev1.NamespaceDefault,
+	}
+	if r.Spec.Template != nil && r.Spec.Template.ObjectMeta.Namespace != "" {
+		namespacedName.Namespace = r.Spec.Template.ObjectMeta.Namespace
+	}
+	return namespacedName
 }
 
 func GetReservationKey(r *schedulingv1alpha1.Reservation) string {

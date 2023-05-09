@@ -153,10 +153,10 @@ func (n *nodeDevice) updateCacheUsed(deviceAllocations apiext.DeviceAllocations,
 	}
 }
 
-func (n *nodeDevice) getUsed(pod *corev1.Pod) map[schedulingv1alpha1.DeviceType]deviceResources {
+func (n *nodeDevice) getUsed(namespace, name string) map[schedulingv1alpha1.DeviceType]deviceResources {
 	podNamespacedName := types.NamespacedName{
-		Namespace: pod.Namespace,
-		Name:      pod.Name,
+		Namespace: namespace,
+		Name:      name,
 	}
 	allocations := map[schedulingv1alpha1.DeviceType]deviceResources{}
 	for deviceType, podAllocated := range n.allocateSet {
