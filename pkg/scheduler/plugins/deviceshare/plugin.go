@@ -240,6 +240,42 @@ func (p *Plugin) RemovePod(ctx context.Context, cycleState *framework.CycleState
 	return nil
 }
 
+func (p *Plugin) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo, assignedPods map[types.UID]*framework.PodInfo) (interface{}, *framework.Status) {
+	nd := p.nodeDeviceCache.getNodeDevice(reservation.Status.NodeName, false)
+	if nd == nil {
+		return nil, nil
+	}
+
+	nd.lock.RLock()
+	defer nd.lock.RUnlock()
+
+	reservePod := reservationutil.NewReservePod(reservation)
+	reservationAllocated := nd.getUsed(reservePod)
+	if len(reservationAllocated) == 0 {
+		return nil, nil
+	}
+
+	klog.V(5).Infof("DeviceShare.RemoveReservation: podToSchedule %v, remove reservation %v on node %s, reservationAllocated: %v",
+		klog.KObj(podToSchedule), klog.KObj(reservation), nodeInfo.Node().Name, reservationAllocated)
+
+	reservedDevices := map[schedulingv1alpha1.DeviceType]deviceResources{}
+	reservedDevices = appendAllocatedDevices(reservedDevices, reservationAllocated)
+
+	for _, podInfo := range assignedPods {
+		podAllocated := nd.getUsed(podInfo.Pod)
+		if len(podAllocated) == 0 {
+			continue
+		}
+
+		klog.V(5).Infof("DeviceShare.AddPodInReservation: podToSchedule %v, add podInfoToAdd %v in reservation %v on node %s, allocatedDevices: %v",
+			klog.KObj(podToSchedule), klog.KObj(podInfo.Pod), klog.KObj(reservation), nodeInfo.Node().Name, podAllocated)
+
+		subtractAllocated(reservedDevices, podAllocated, false)
+	}
+
+	return reservedDevices, nil
+}
+
 func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
 	state, status := getPreFilterState(cycleState)
 	if !status.IsSuccess() {

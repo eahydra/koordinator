@@ -23,6 +23,7 @@ import (
 	"unsafe"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 
@@ -256,6 +257,24 @@ func (ext *frameworkExtenderImpl) RunPreBindPlugins(ctx context.Context, state *
 		}
 	}
 	return nil
+}
+
+// RunReservationPreFilterExtensionRestoreReservations restores the Reservation during PreFilter phase
+func (ext *frameworkExtenderImpl) RunReservationPreFilterExtensionRestoreReservations(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo, assignedPods map[types.UID]*framework.PodInfo) (map[string]interface{}, *framework.Status) {
+	if len(ext.reservationPreFilterExtensions) == 0 {
+		return nil, nil
+	}
+	m := map[string]interface{}{}
+	for _, pl := range ext.reservationPreFilterExtensions {
+		val, status := pl.RestoreReservation(ctx, cycleState, podToSchedule, reservation, nodeInfo, assignedPods)
+		if !status.IsSuccess() {
+			err := status.AsError()
+			klog.ErrorS(err, "Failed running RestoreReservations on plugin", "plugin", pl.Name(), "pod", klog.KObj(podToSchedule))
+			return nil, framework.AsStatus(fmt.Errorf("running RemoveReservation on plugin %q: %w", pl.Name(), err))
+		}
+		m[pl.Name()] = val
+	}
+	return m, nil
 }
 
 // RunReservationPreFilterExtensionRemoveReservation restores the Reservation during PreFilter phase

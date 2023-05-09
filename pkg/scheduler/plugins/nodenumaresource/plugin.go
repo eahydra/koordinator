@@ -258,6 +258,10 @@ func (p *Plugin) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
 }
 
+func (p *Plugin) RestoreReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo, assignedPods map[types.UID]*framework.PodInfo) (interface{}, *framework.Status) {
+	return nil, nil
+}
+
 func (p *Plugin) RemoveReservation(ctx context.Context, cycleState *framework.CycleState, podToSchedule *corev1.Pod, reservation *schedulingv1alpha1.Reservation, nodeInfo *framework.NodeInfo) *framework.Status {
 	state, status := getPreFilterState(cycleState)
 	if !status.IsSuccess() {
