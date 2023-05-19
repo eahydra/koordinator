@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/pointer"
 
@@ -27,6 +28,9 @@ import (
 )
 
 const (
+	// LabelPodOperatingMode describes the mode of operation for Pod.
+	LabelPodOperatingMode = SchedulingDomainPrefix + "/operating-mode"
+
 	// LabelReservationOrder controls the preference logic for Reservation.
 	// Reservation with lower order is preferred to be selected before Reservation with higher order.
 	// But if it is 0, Reservation will be selected according to the capacity score.
@@ -37,6 +41,26 @@ const (
 
 	// AnnotationReservationAffinity represents the constraints of Pod selection Reservation
 	AnnotationReservationAffinity = SchedulingDomainPrefix + "/reservation-affinity"
+
+	// AnnotationReservationOwners indicates the owner specification which can allocate reserved resources
+	AnnotationReservationOwners = SchedulingDomainPrefix + "/reservation-owners"
+
+	// AnnotationReservationCurrentOwner indicates current resource owners which allocated the reservation resources.
+	AnnotationReservationCurrentOwner = SchedulingDomainPrefix + "/reservation-current-owner"
+)
+
+// Drawing on the design proposal being discussed in the community
+// Doc: https://docs.google.com/document/d/1sbFUA_9qWtorJkcukNULr12FKX6lMvISiINxAURHNFo/edit#heading=h.xgjl2srtytjt
+
+type PodOperatingMode string
+
+const (
+	// RunnablePodOperatingMode represents the original pod behavior, it is the default mode where the
+	// pod’s containers are executed by Kubelet when the pod is assigned a node.
+	RunnablePodOperatingMode PodOperatingMode = "Runnable"
+
+	// ReservationPodOperatingMode means the pod represents a scheduling and resource reservation unit
+	ReservationPodOperatingMode PodOperatingMode = "Reservation"
 )
 
 type ReservationAllocated struct {
@@ -82,13 +106,13 @@ func GetReservationAllocated(pod *corev1.Pod) (*ReservationAllocated, error) {
 	return reservationAllocated, nil
 }
 
-func SetReservationAllocated(pod *corev1.Pod, r *schedulingv1alpha1.Reservation) {
+func SetReservationAllocated(pod *corev1.Pod, r metav1.Object) {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
 	reservationAllocated := &ReservationAllocated{
-		Name: r.Name,
-		UID:  r.UID,
+		Name: r.GetName(),
+		UID:  r.GetUID(),
 	}
 	data, _ := json.Marshal(reservationAllocated) // assert no error
 	pod.Annotations[AnnotationReservationAllocated] = string(data)
@@ -106,4 +130,48 @@ func GetReservationAffinity(annotations map[string]string) (*ReservationAffinity
 		}
 	}
 	return &affinity, nil
+}
+
+func IsReservationOperatingMode(pod *corev1.Pod) bool {
+	return pod.Labels[LabelPodOperatingMode] == string(ReservationPodOperatingMode)
+}
+
+func GetReservationOwners(annotations map[string]string) ([]schedulingv1alpha1.ReservationOwner, error) {
+	var owners []schedulingv1alpha1.ReservationOwner
+	if s := annotations[AnnotationReservationOwners]; s != "" {
+		err := json.Unmarshal([]byte(s), &owners)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return owners, nil
+}
+
+func GetReservationCurrentOwner(annotations map[string]string) (*corev1.ObjectReference, error) {
+	var owner corev1.ObjectReference
+	s := annotations[AnnotationReservationCurrentOwner]
+	if s == "" {
+		return nil, nil
+	}
+	err := json.Unmarshal([]byte(s), &owner)
+	if err != nil {
+		return nil, err
+	}
+	return &owner, nil
+}
+
+func SetReservationCurrentOwner(annotations map[string]string, owner *corev1.ObjectReference) error {
+	if owner == nil {
+		return nil
+	}
+	data, err := json.Marshal(owner)
+	if err != nil {
+		return err
+	}
+	annotations[AnnotationReservationCurrentOwner] = string(data)
+	return nil
+}
+
+func RemoveReservationCurrentOwner(annotations map[string]string) {
+	delete(annotations, AnnotationReservationCurrentOwner)
 }
