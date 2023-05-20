@@ -660,6 +660,9 @@ func (gqm *GroupQuotaManager) ReservePod(quotaName string, p *v1.Pod) {
 	gqm.hierarchyUpdateLock.RLock()
 	defer gqm.hierarchyUpdateLock.RUnlock()
 
+	if gqm.getPodIsAssignedNoLock(quotaName, p) {
+		gqm.updatePodUsedNoLock(quotaName, p, nil)
+	}
 	gqm.updatePodIsAssignedNoLock(quotaName, p, true)
 	gqm.updatePodUsedNoLock(quotaName, nil, p)
 }
