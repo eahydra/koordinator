@@ -148,26 +148,41 @@ func GetNodeThatCanRunPod(f *framework.Framework) string {
 
 // Get2NodesThatCanRunPod return a 2-node slice where can run pod.
 func Get2NodesThatCanRunPod(f *framework.Framework) []string {
+	return GetNNodesThatCanRunPod(f, 2)
+}
+
+// GetNNodesThatCanRunPod return a 4-node slice where can run pod.
+func GetNNodesThatCanRunPod(f *framework.Framework, numNode int) []string {
 	firstNode := GetNodeThatCanRunPod(f)
-	ginkgo.By("Trying to launch a pod without a label to get a node which can launch it.")
-	pod := pausePodConfig{
-		Name: "without-label",
-		Affinity: &corev1.Affinity{
-			NodeAffinity: &corev1.NodeAffinity{
-				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-					NodeSelectorTerms: []corev1.NodeSelectorTerm{
-						{
-							MatchFields: []corev1.NodeSelectorRequirement{
-								{Key: "metadata.name", Operator: corev1.NodeSelectorOpNotIn, Values: []string{firstNode}},
+	node, err := f.ClientSet.CoreV1().Nodes().Get(context.TODO(), firstNode, metav1.GetOptions{})
+	framework.ExpectNoError(err)
+	hostNames := []string{node.Labels[corev1.LabelHostname]}
+	scheduledNodes := []string{firstNode}
+	for i := 1; i < numNode; i++ {
+		ginkgo.By("Trying to launch a pod without a label to get a node which can launch it.")
+		pod := pausePodConfig{
+			Name: "without-label",
+			Affinity: &corev1.Affinity{
+				NodeAffinity: &corev1.NodeAffinity{
+					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+						NodeSelectorTerms: []corev1.NodeSelectorTerm{
+							{
+								MatchExpressions: []corev1.NodeSelectorRequirement{
+									{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpNotIn, Values: hostNames},
+								},
 							},
 						},
 					},
 				},
 			},
-		},
+		}
+		currentNode := runPodAndGetNodeName(f, pod)
+		scheduledNodes = append(scheduledNodes, currentNode)
+		node, err := f.ClientSet.CoreV1().Nodes().Get(context.TODO(), currentNode, metav1.GetOptions{})
+		framework.ExpectNoError(err)
+		hostNames = append(hostNames, node.Labels[corev1.LabelHostname])
 	}
-	secondNode := runPodAndGetNodeName(f, pod)
-	return []string{firstNode, secondNode}
+	return scheduledNodes
 }
 
 type pauseRSConfig struct {
@@ -188,8 +203,11 @@ func initPauseRS(f *framework.Framework, conf pauseRSConfig) *appsv1.ReplicaSet 
 				MatchLabels: pausePod.Labels,
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: pausePod.ObjectMeta.Labels},
-				Spec:       pausePod.Spec,
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      pausePod.ObjectMeta.Labels,
+					Annotations: pausePod.ObjectMeta.Annotations,
+				},
+				Spec: pausePod.Spec,
 			},
 		},
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/elasticquota"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/loadaware"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/nodenumaresource"
+	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/podtopologyaware"
 	"github.com/koordinator-sh/koordinator/pkg/scheduler/plugins/reservation"
 
 	// Ensure metric package is initialized
@@ -51,6 +52,7 @@ var koordinatorPlugins = map[string]frameworkruntime.PluginFactory{
 	elasticquota.Name:                elasticquota.New,
 	compatibledefaultpreemption.Name: compatibledefaultpreemption.New,
 	defaultprebind.Name:              defaultprebind.New,
+	podtopologyaware.Name:            podtopologyaware.New,
 }
 
 func flatten(plugins map[string]frameworkruntime.PluginFactory) []app.Option {
